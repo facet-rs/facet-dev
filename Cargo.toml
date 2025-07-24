@@ -8,11 +8,6 @@ keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
 
 [dependencies]
-ctrlc = "3.4.6"
 fs-err = "3.1.0"
-indicatif = "0.18.0"
 log = { version = "0.4.27", features = ["std"] }
 owo-colors = "4.2.1"
-
-[target.'cfg(not(windows))'.dependencies]
-termion = "4.0.5"
