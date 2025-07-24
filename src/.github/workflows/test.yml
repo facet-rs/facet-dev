@@ -59,7 +59,7 @@ jobs:
           set -euo pipefail
 
           cargo hack check --each-feature --locked \
-            --rust-version --ignore-private --workspace \
+            --rust-version --workspace \
             --keep-going --exclude-no-default-features
 
   minimal-versions:
