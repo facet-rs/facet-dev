@@ -1,5 +1,6 @@
-use log::{debug, error, warn, Level, LevelFilter, Log, Metadata, Record};
+use log::{Level, LevelFilter, Log, Metadata, Record, debug, error, warn};
 use owo_colors::{OwoColorize, Style};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 use std::{
     fs,
@@ -15,13 +16,25 @@ struct Job {
     path: PathBuf,
     old_content: Option<Vec<u8>>,
     new_content: Vec<u8>,
+    executable: bool,
 }
 
 impl Job {
     fn is_noop(&self) -> bool {
         match &self.old_content {
-            Some(old) => &self.new_content == old,
-            None => self.new_content.is_empty(),
+            Some(old) => {
+                if &self.new_content != old {
+                    return false;
+                }
+                // Check if executable bit would change
+                let current_executable = self
+                    .path
+                    .metadata()
+                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false);
+                current_executable == self.executable
+            }
+            None => self.new_content.is_empty() && !self.executable,
         }
     }
 
@@ -36,6 +49,14 @@ impl Job {
         }
 
         fs::write(&self.path, &self.new_content)?;
+
+        // Set executable bit if needed
+        if self.executable {
+            let mut perms = fs::metadata(&self.path)?.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            fs::set_permissions(&self.path, perms)?;
+        }
+
         // Now stage it, best effort
         let _ = Command::new("git").arg("add").arg(&self.path).status();
         Ok(())
@@ -53,6 +74,42 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
     };
 
     let template_name = "README.md.in";
+
+    // Helper function to process a README template
+    let process_readme_template = |template_path: &Path, output_dir: &Path, crate_name: &str| {
+        if !template_path.exists() {
+            error!("🚫 Missing template: {}", template_path.display().red());
+            return;
+        }
+
+        // Read the template file
+        let template_input = match fs::read_to_string(template_path) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to read template {}: {e}", template_path.display());
+                return;
+            }
+        };
+
+        let readme_content = readme::generate(readme::GenerateReadmeOpts {
+            crate_name: crate_name.to_string(),
+            input: template_input,
+        });
+
+        let readme_path = output_dir.join("README.md");
+        let old_content = fs::read(&readme_path).ok();
+
+        let job = Job {
+            path: readme_path,
+            old_content,
+            new_content: readme_content.into_bytes(),
+            executable: false,
+        };
+
+        if let Err(e) = sender.send(job) {
+            error!("Failed to send job: {e}");
+        }
+    };
 
     for entry in entries {
         let entry = match entry {
@@ -91,93 +148,12 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
             crate_path.join(template_name)
         };
 
-        if template_path.exists() {
-            // Read the template file
-            let template_input = match fs::read_to_string(&template_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("Failed to read template {}: {e}", template_path.display());
-                    continue;
-                }
-            };
-
-            // Generate the README content using readme::generate
-            let readme_content = readme::generate(readme::GenerateReadmeOpts {
-                crate_name: crate_name.clone(),
-                input: template_input,
-            });
-
-            // Determine the README.md output path
-            let readme_path = crate_path.join("README.md");
-
-            // Read old_content from README.md if exists, otherwise None
-            let old_content = fs::read(&readme_path).ok();
-
-            // Build the job
-            let job = Job {
-                path: readme_path,
-                old_content,
-                new_content: readme_content.into_bytes(),
-            };
-
-            // Send job
-            if let Err(e) = sender.send(job) {
-                error!("Failed to send job: {e}");
-            }
-        } else {
-            error!("🚫 Missing template: {}", template_path.display().red());
-        }
+        process_readme_template(&template_path, &crate_path, &crate_name);
     }
 
-    // Also handle the workspace README (the "facet" crate at root)
+    // Also handle the workspace/top-level README, if any
     let workspace_template_path = workspace_dir.join(template_name);
-    if workspace_template_path.exists() {
-        // Read the template file
-        let template_input = match fs::read_to_string(&workspace_template_path) {
-            Ok(s) => s,
-            Err(e) => {
-                error!(
-                    "Failed to read template {}: {e}",
-                    workspace_template_path.display()
-                );
-                return;
-            }
-        };
-
-        // Generate the README content using readme::generate
-        let readme_content = readme::generate(readme::GenerateReadmeOpts {
-            crate_name: "facet".to_string(),
-            input: template_input,
-        });
-
-        // Determine the README.md output path
-        let readme_path = workspace_dir.join("README.md");
-
-        // Read old_content from README.md if exists, otherwise None
-        let old_content = fs::read(&readme_path).ok();
-
-        // Build the job
-        let job = Job {
-            path: readme_path,
-            old_content,
-            new_content: readme_content.into_bytes(),
-        };
-
-        // Send job
-        if let Err(e) = sender.send(job) {
-            error!("Failed to send workspace job: {e}");
-        }
-    } else {
-        error!(
-            "🚫 {}",
-            format_args!(
-                "Template file {} not found for workspace. We looked at {}",
-                template_name,
-                workspace_template_path.display()
-            )
-            .red()
-        );
-    }
+    process_readme_template(&workspace_template_path, &workspace_dir, "facet");
 }
 
 fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &StagedFiles) {
@@ -276,22 +252,19 @@ fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &Sta
         }
 
         let formatted = output.stdout;
-
-        // Only enqueue a job if the formatted output is different
-        if formatted != original {
-            let job = Job {
-                path: path.clone(),
-                old_content: Some(original),
-                new_content: formatted,
-            };
-            if let Err(e) = sender.send(job) {
-                error!("Failed to send rustfmt job for {}: {}", path.display(), e);
-            }
+        let job = Job {
+            path: path.clone(),
+            old_content: Some(original),
+            new_content: formatted,
+            executable: false,
+        };
+        if let Err(e) = sender.send(job) {
+            error!("Failed to send rustfmt job for {}: {}", path.display(), e);
         }
     }
 }
 
-static GITHUB_TEST_WORKFLOW: &str = include_str!("./.github/workflows/test.yml");
+static GITHUB_TEST_WORKFLOW: &str = include_str!(".github/workflows/test.yml");
 
 fn enqueue_github_workflow_jobs(sender: std::sync::mpsc::Sender<Job>) {
     use std::fs;
@@ -302,9 +275,53 @@ fn enqueue_github_workflow_jobs(sender: std::sync::mpsc::Sender<Job>) {
         path: workflow_path.to_path_buf(),
         old_content,
         new_content,
+        executable: false,
     };
     if let Err(e) = sender.send(job) {
         error!("Failed to send GitHub workflow job: {e}");
+    }
+}
+
+static CARGO_HUSKY_PRECOMMIT_HOOK: &str = include_str!(".cargo-husky/hooks/pre-commit");
+
+fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>) {
+    use std::process::Command;
+
+    // Check if cargo-husky is a dev dependency
+    let output = Command::new("cargo")
+        .arg("tree")
+        .arg("-e")
+        .arg("dev")
+        .arg("-i")
+        .arg("cargo-husky")
+        .output();
+
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                error!("cargo-husky is not a dev dependency or cargo tree failed");
+                error!("To add cargo-husky as a dev dependency, run:");
+                error!("  cargo add cargo-husky --dev --no-default-features -F user-hooks");
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            error!("Failed to run cargo tree command: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    let hook_path = Path::new(".cargo-husky/hooks/pre-commit");
+    let old_content = fs::read(hook_path).ok();
+    let new_content = CARGO_HUSKY_PRECOMMIT_HOOK.as_bytes().to_vec();
+    let job = Job {
+        path: hook_path.to_path_buf(),
+        old_content,
+        new_content,
+        executable: true,
+    };
+    if let Err(e) = sender.send(job) {
+        error!("Failed to send cargo-husky pre-commit hook job: {e}");
     }
 }
 
@@ -418,6 +435,13 @@ fn main() {
         let sender = tx_job.clone();
         move || {
             enqueue_github_workflow_jobs(sender);
+        }
+    }));
+
+    handles.push(std::thread::spawn({
+        let sender = tx_job.clone();
+        move || {
+            enqueue_cargo_husky_precommit_hook_jobs(sender);
         }
     }));
 
