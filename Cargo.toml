@@ -6,7 +6,7 @@ edition = "2021"
 description = "Internal development utilities for Facet"
 keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
-rust-version = "1.88"
+rust-version = "1.87"
 
 [dependencies]
 fs-err = "3.1.0"
