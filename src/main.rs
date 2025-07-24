@@ -546,3 +546,11 @@ fn setup_logger() {
     log::set_boxed_logger(logger).unwrap();
     log::set_max_level(LevelFilter::Trace);
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        // well, it does work!
+    }
+}
