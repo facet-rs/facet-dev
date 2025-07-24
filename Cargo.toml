@@ -6,6 +6,7 @@ edition = "2021"
 description = "Internal development utilities for Facet"
 keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
+rust-version = "1.88"
 
 [dependencies]
 fs-err = "3.1.0"
@@ -13,4 +14,6 @@ log = { version = "0.4.27", features = ["std"] }
 owo-colors = "4.2.1"
 
 [dev-dependencies]
-cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }
+cargo-husky = { version = "1.5.0", default-features = false, features = [
+    "user-hooks",
+] }
