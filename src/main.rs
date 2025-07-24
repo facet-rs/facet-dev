@@ -270,6 +270,16 @@ fn enqueue_github_workflow_jobs(sender: std::sync::mpsc::Sender<Job>) {
     use std::fs;
     let workflow_path = Path::new(".github/workflows/test.yml");
     let old_content = fs::read(workflow_path).ok();
+
+    // Check if the old content contains the handwritten marker
+    if let Some(content) = &old_content {
+        if let Ok(content_str) = String::from_utf8(content.clone()) {
+            if content_str.contains("# HANDWRITTEN: facet-dev") {
+                return;
+            }
+        }
+    }
+
     let new_content = GITHUB_TEST_WORKFLOW.as_bytes().to_vec();
     let job = Job {
         path: workflow_path.to_path_buf(),
