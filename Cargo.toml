@@ -6,6 +6,7 @@ description = "Internal development utilities for Facet"
 keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
 rust-version = "1.87"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 fs-err = "3.1.0"
