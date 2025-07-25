@@ -1,4 +1,4 @@
-use log::{debug, error, warn, Level, LevelFilter, Log, Metadata, Record};
+use log::{Level, LevelFilter, Log, Metadata, Record, debug, error, warn};
 use owo_colors::{OwoColorize, Style};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
@@ -319,6 +319,24 @@ fn enqueue_github_workflow_jobs(sender: std::sync::mpsc::Sender<Job>) {
     }
 }
 
+static GITHUB_FUNDING_YML: &str = include_str!(".github/FUNDING.yml");
+
+fn enqueue_github_funding_jobs(sender: std::sync::mpsc::Sender<Job>) {
+    use std::fs;
+    let funding_path = Path::new(".github/FUNDING.yml");
+    let old_content = fs::read(funding_path).ok();
+    let new_content = GITHUB_FUNDING_YML.as_bytes().to_vec();
+    let job = Job {
+        path: funding_path.to_path_buf(),
+        old_content,
+        new_content,
+        executable: false,
+    };
+    if let Err(e) = sender.send(job) {
+        error!("Failed to send GitHub funding job: {e}");
+    }
+}
+
 static CARGO_HUSKY_PRECOMMIT_HOOK: &str = include_str!(".cargo-husky/hooks/pre-commit");
 
 fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>) {
@@ -472,6 +490,13 @@ fn main() {
         let sender = tx_job.clone();
         move || {
             enqueue_github_workflow_jobs(sender);
+        }
+    }));
+
+    handles.push(std::thread::spawn({
+        let sender = tx_job.clone();
+        move || {
+            enqueue_github_funding_jobs(sender);
         }
     }));
 
