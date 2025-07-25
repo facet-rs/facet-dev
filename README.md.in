@@ -1,1 +1,15 @@
-Internal crate that generates some of the code for `facet-core`.
+facet-dev runs as a pre-commit hook for most (all?) repositories under
+the <https://github.com/facet-rs/> umbrella.
+
+It:
+
+  * Generates `README.md` from `README.md.in`
+  * Sets up a base CI pipeline for Rust crates (see `src/.github/workflows`)
+  * Sets up funding information
+  * Sets up a pre-commit hook via [cargo-husky](https://lib.rs/crates/cargo-husky)A=
+    that installs facet-dev and runs `facet-dev generate`
+
+Since the pre-commit hook installs the latest facet-dev from git, and since
+updated files generated files are unconditionally staged at pre-commit time, if
+facet-dev gets updated in the middle of someone working on something, the
+changes might end up in an unrelated PR. Oh well.

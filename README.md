@@ -1,21 +1,30 @@
-<h1>
-<picture>
-    <source type="image/webp" media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/logo-v2/facet-b-dark.webp">
-    <source type="image/png" media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/logo-v2/facet-b-dark.png">
-    <source type="image/webp" srcset="https://github.com/facet-rs/facet/raw/main/static/logo-v2/facet-b-light.webp">
-    <img src="https://github.com/facet-rs/facet/raw/main/static/logo-v2/facet-b-light.png" height="35" alt="Facet logo - a reflection library for Rust">
-</picture>
-</h1>
+# facet-dev
 
-[![Coverage Status](https://coveralls.io/repos/github/facet-rs/facet/badge.svg?branch=main)](https://coveralls.io/github/facet-rs/facet?branch=main)
+[![Coverage Status](https://coveralls.io/repos/github/facet-rs/facet-dev/badge.svg?branch=main)](https://coveralls.io/github/facet-rs/facet?branch=main)
 [![crates.io](https://img.shields.io/crates/v/facet-dev.svg)](https://crates.io/crates/facet-dev)
 [![documentation](https://docs.rs/facet-dev/badge.svg)](https://docs.rs/facet-dev)
 [![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/facet-dev.svg)](./LICENSE)
 [![Discord](https://img.shields.io/discord/1379550208551026748?logo=discord&label=discord)](https://discord.gg/JhD7CwCJ8F)
 
-_Logo by [Misiasart](https://misiasart.com/)_
+facet-dev runs as a pre-commit hook for most (all?) repositories under
+the <https://github.com/facet-rs/> umbrella.
 
-Thanks to all individual and corporate sponsors, without whom this work could not exist:
+It:
+
+  * Generates `README.md` from `README.md.in`
+  * Sets up a base CI pipeline for Rust crates (see `src/.github/workflows`)
+  * Sets up funding information
+  * Sets up a pre-commit hook via [cargo-husky](https://lib.rs/crates/cargo-husky)A=
+    that installs facet-dev and runs `facet-dev generate`
+
+Since the pre-commit hook installs the latest facet-dev from git, and since
+updated files generated files are unconditionally staged at pre-commit time, if
+facet-dev gets updated in the middle of someone working on something, the
+changes might end up in an unrelated PR. Oh well.
+
+## Sponsors
+
+Thanks to all individual sponsors:
 
 <p> <a href="https://ko-fi.com/fasterthanlime">
 <picture>
@@ -28,9 +37,18 @@ Thanks to all individual and corporate sponsors, without whom this work could no
 <img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/github-light.svg" height="40" alt="GitHub Sponsors">
 </picture>
 </a> <a href="https://patreon.com/fasterthanlime">
+    <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/patreon-dark.svg">
+    <img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/patreon-light.svg" height="40" alt="Patreon">
+    </picture>
+</a> </p>
+
+...along with corporate sponsors:
+
+<p> <a href="https://aws.amazon.com">
 <picture>
-<source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/patreon-dark.svg">
-<img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/patreon-light.svg" height="40" alt="Patreon">
+<source media="(prefers-color-scheme: dark)" srcset="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/aws-dark.svg">
+<img src="https://github.com/facet-rs/facet/raw/main/static/sponsors-v3/aws-light.svg" height="40" alt="AWS">
 </picture>
 </a> <a href="https://zed.dev">
 <picture>
@@ -44,7 +62,11 @@ Thanks to all individual and corporate sponsors, without whom this work could no
 </picture>
 </a> </p>
 
-Internal crate that generates some of the code for `facet-core`.
+...without whom this work could not exist.
+
+## Special thanks
+
+The facet logo was drawn by [Misiasart](https://misiasart.com/)_
 
 ## License
 
