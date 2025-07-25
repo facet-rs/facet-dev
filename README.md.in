@@ -6,7 +6,7 @@ It:
   * Generates `README.md` from `README.md.in`
   * Sets up a base CI pipeline for Rust crates (see `src/.github/workflows`)
   * Sets up funding information
-  * Sets up a pre-commit hook via [cargo-husky](https://lib.rs/crates/cargo-husky)A=
+  * Sets up a pre-commit hook via [cargo-husky](https://lib.rs/crates/cargo-husky)
     that installs facet-dev and runs `facet-dev generate`
 
 Since the pre-commit hook installs the latest facet-dev from git, and since
