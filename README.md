@@ -66,7 +66,7 @@ Thanks to all individual sponsors:
 
 ## Special thanks
 
-The facet logo was drawn by [Misiasart](https://misiasart.com/)_
+The facet logo was drawn by [Misiasart](https://misiasart.com/).
 
 ## License
 
