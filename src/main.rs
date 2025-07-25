@@ -1,4 +1,4 @@
-use log::{Level, LevelFilter, Log, Metadata, Record, debug, error, warn};
+use log::{debug, error, warn, Level, LevelFilter, Log, Metadata, Record};
 use owo_colors::{OwoColorize, Style};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
@@ -153,7 +153,34 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
 
     // Also handle the workspace/top-level README, if any
     let workspace_template_path = workspace_dir.join(template_name);
-    process_readme_template(&workspace_template_path, &workspace_dir, "facet");
+
+    // Get workspace name from cargo tree
+    let workspace_name = match Command::new("cargo")
+        .arg("tree")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|child| {
+            let output = child.wait_with_output()?;
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(first_line) = stdout.lines().next() {
+                    // Extract package name from "package-name v0.1.0 (/path/to/package)"
+                    if let Some(space_pos) = first_line.find(' ') {
+                        return Ok(first_line[..space_pos].to_string());
+                    }
+                }
+            }
+            Err(std::io::Error::other("Failed to parse cargo tree output"))
+        }) {
+        Ok(name) => name,
+        Err(e) => {
+            warn!("Failed to get workspace name from cargo tree: {e}, falling back to 'facet'");
+            "facet".to_string()
+        }
+    };
+
+    process_readme_template(&workspace_template_path, &workspace_dir, &workspace_name);
 }
 
 fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &StagedFiles) {
