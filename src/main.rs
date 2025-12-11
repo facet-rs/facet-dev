@@ -1,5 +1,6 @@
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, error, warn};
 use owo_colors::{OwoColorize, Style};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 use std::{
@@ -16,6 +17,7 @@ struct Job {
     path: PathBuf,
     old_content: Option<Vec<u8>>,
     new_content: Vec<u8>,
+    #[cfg(unix)]
     executable: bool,
 }
 
@@ -26,15 +28,31 @@ impl Job {
                 if &self.new_content != old {
                     return false;
                 }
-                // Check if executable bit would change
-                let current_executable = self
-                    .path
-                    .metadata()
-                    .map(|m| m.permissions().mode() & 0o111 != 0)
-                    .unwrap_or(false);
-                current_executable == self.executable
+                #[cfg(unix)]
+                {
+                    // Check if executable bit would change
+                    let current_executable = self
+                        .path
+                        .metadata()
+                        .map(|m| m.permissions().mode() & 0o111 != 0)
+                        .unwrap_or(false);
+                    current_executable == self.executable
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
             }
-            None => self.new_content.is_empty() && !self.executable,
+            None => {
+                #[cfg(unix)]
+                {
+                    self.new_content.is_empty() && !self.executable
+                }
+                #[cfg(not(unix))]
+                {
+                    self.new_content.is_empty()
+                }
+            }
         }
     }
 
@@ -51,6 +69,7 @@ impl Job {
         fs::write(&self.path, &self.new_content)?;
 
         // Set executable bit if needed
+        #[cfg(unix)]
         if self.executable {
             let mut perms = fs::metadata(&self.path)?.permissions();
             perms.set_mode(perms.mode() | 0o111);
@@ -103,6 +122,7 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
             path: readme_path,
             old_content,
             new_content: readme_content.into_bytes(),
+            #[cfg(unix)]
             executable: false,
         };
 
@@ -283,6 +303,7 @@ fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &Sta
             path: path.clone(),
             old_content: Some(original),
             new_content: formatted,
+            #[cfg(unix)]
             executable: false,
         };
         if let Err(e) = sender.send(job) {
@@ -312,6 +333,7 @@ fn enqueue_github_workflow_jobs(sender: std::sync::mpsc::Sender<Job>) {
         path: workflow_path.to_path_buf(),
         old_content,
         new_content,
+        #[cfg(unix)]
         executable: false,
     };
     if let Err(e) = sender.send(job) {
@@ -330,6 +352,7 @@ fn enqueue_github_funding_jobs(sender: std::sync::mpsc::Sender<Job>) {
         path: funding_path.to_path_buf(),
         old_content,
         new_content,
+        #[cfg(unix)]
         executable: false,
     };
     if let Err(e) = sender.send(job) {
@@ -373,10 +396,210 @@ fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>)
         path: hook_path.to_path_buf(),
         old_content,
         new_content,
+        #[cfg(unix)]
         executable: true,
     };
     if let Err(e) = sender.send(job) {
         error!("Failed to send cargo-husky pre-commit hook job: {e}");
+    }
+}
+
+fn run_pre_push() {
+    use std::collections::{BTreeSet, HashSet};
+
+    println!("{}", "Running pre-push checks...".cyan().bold());
+
+    // Find the merge base with origin/main
+    let merge_base_output = Command::new("git")
+        .args(["merge-base", "HEAD", "origin/main"])
+        .output();
+
+    let merge_base = match merge_base_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            warn!("Failed to find merge base with origin/main, using HEAD");
+            "HEAD".to_string()
+        }
+    };
+
+    // Get the list of changed files
+    let diff_output = Command::new("git")
+        .args(["diff", "--name-only", &format!("{}...HEAD", merge_base)])
+        .output();
+
+    let changed_files = match diff_output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            error!("Failed to get changed files: {}", e);
+            std::process::exit(1);
+        }
+        Ok(output) => {
+            error!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::process::exit(1);
+        }
+    };
+
+    if changed_files.is_empty() {
+        println!("{}", "No changes detected".green().bold());
+        std::process::exit(0);
+    }
+
+    // Find which crates are affected
+    let mut affected_crates = HashSet::new();
+
+    for file in &changed_files {
+        let path = Path::new(file);
+
+        // Find the crate directory by looking for Cargo.toml
+        let mut current = path;
+        while let Some(parent) = current.parent() {
+            let cargo_toml = if parent.as_os_str().is_empty() {
+                PathBuf::from("Cargo.toml")
+            } else {
+                parent.join("Cargo.toml")
+            };
+
+            if cargo_toml.exists() {
+                // Read Cargo.toml to get the package name
+                if let Ok(content) = fs::read_to_string(&cargo_toml) {
+                    // Simple parsing: look for [package] section and name field
+                    let mut in_package = false;
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed == "[package]" {
+                            in_package = true;
+                        } else if trimmed.starts_with('[') {
+                            in_package = false;
+                        } else if in_package && trimmed.starts_with("name") {
+                            if let Some(name_part) = trimmed.split('=').nth(1) {
+                                let name = name_part.trim().trim_matches('"').trim_matches('\'');
+                                affected_crates.insert(name.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            current = parent;
+        }
+    }
+
+    if affected_crates.is_empty() {
+        println!("{}", "No crates affected by changes".yellow());
+        std::process::exit(0);
+    }
+
+    // Sort for consistent output
+    let affected_crates: BTreeSet<_> = affected_crates.into_iter().collect();
+
+    println!(
+        "{} Affected crates: {}",
+        "🔍".cyan(),
+        affected_crates
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .yellow()
+    );
+
+    let mut all_passed = true;
+
+    for crate_name in &affected_crates {
+        println!(
+            "\n{} Checking crate: {}",
+            "📦".cyan(),
+            crate_name.yellow().bold()
+        );
+
+        // Run clippy
+        print!("  {} Running clippy... ", "🔍".cyan());
+        io::stdout().flush().unwrap();
+        let clippy_status = Command::new("cargo")
+            .args(["clippy", "-p", crate_name, "--", "-D", "warnings"])
+            .status();
+
+        match clippy_status {
+            Ok(status) if status.success() => {
+                println!("{}", "passed".green());
+            }
+            _ => {
+                println!("{}", "failed".red());
+                all_passed = false;
+            }
+        }
+
+        // Run tests
+        print!("  {} Running tests... ", "🧪".cyan());
+        io::stdout().flush().unwrap();
+        let test_status = Command::new("cargo")
+            .args(["test", "-p", crate_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        match test_status {
+            Ok(status) if status.success() => {
+                println!("{}", "passed".green());
+            }
+            _ => {
+                println!("{}", "failed".red());
+                all_passed = false;
+            }
+        }
+
+        // Run doc tests
+        print!("  {} Running doc tests... ", "📚".cyan());
+        io::stdout().flush().unwrap();
+        let doctest_status = Command::new("cargo")
+            .args(["test", "--doc", "-p", crate_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        match doctest_status {
+            Ok(status) if status.success() => {
+                println!("{}", "passed".green());
+            }
+            Ok(status) if status.code() == Some(101) => {
+                // Exit code 101 often means "no tests to run"
+                println!("{}", "skipped (no lib)".yellow());
+            }
+            _ => {
+                println!("{}", "failed".red());
+                all_passed = false;
+            }
+        }
+    }
+
+    println!();
+    if all_passed {
+        println!(
+            "{} {}",
+            "✅".green(),
+            "All pre-push checks passed!".green().bold()
+        );
+        std::process::exit(0);
+    } else {
+        println!(
+            "{} {}",
+            "❌".red(),
+            "Some pre-push checks failed".red().bold()
+        );
+        std::process::exit(1);
     }
 }
 
@@ -454,6 +677,13 @@ fn main() {
             };
             log::set_max_level(level);
         }
+    }
+
+    // Parse CLI arguments
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "pre-push" {
+        run_pre_push();
+        return;
     }
 
     let staged_files = match collect_staged_files() {
