@@ -614,7 +614,6 @@ fn run_command_with_streaming(
     let mut stdout_buffer = Vec::new();
     let mut stderr_buffer = Vec::new();
     let mut streaming = false;
-    let mut last_update = Instant::now();
 
     loop {
         // Check if process has exited
@@ -689,25 +688,6 @@ fn run_command_with_streaming(
                     }
                     stderr_buffer.push(line);
                     got_output = true;
-                }
-
-                // Update timer display if enough time has passed
-                if last_update.elapsed() >= Duration::from_secs(1) {
-                    if streaming {
-                        eprint!(
-                            "\r  {} Elapsed: {:.1}s",
-                            "⏱️".yellow(),
-                            elapsed.as_secs_f32()
-                        );
-                    } else {
-                        eprint!(
-                            "\r  {} Elapsed: {:.1}s",
-                            "⏱️".yellow(),
-                            elapsed.as_secs_f32()
-                        );
-                    }
-                    io::stderr().flush().unwrap();
-                    last_update = Instant::now();
                 }
 
                 // Sleep briefly to avoid busy-waiting
