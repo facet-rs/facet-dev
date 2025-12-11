@@ -1,18 +1,42 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_DIR="$SCRIPT_DIR/.."
+HOOK_SOURCE_DIR="$(git rev-parse --show-toplevel)/hooks"
+GIT_DIR="$(git rev-parse --git-dir)"
 
-# Get the actual git directory (handles worktrees)
-GIT_DIR=$(cd "$PROJECT_DIR" && git rev-parse --git-dir)
-GIT_HOOKS_DIR="$GIT_DIR/hooks"
+copy_hook() {
+  local src="$1"
+  local dst="$2"
 
-# Create hooks directory if it doesn't exist
-mkdir -p "$GIT_HOOKS_DIR"
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  chmod +x "$dst"
 
-# Copy pre-push hook
-cp "$SCRIPT_DIR/pre-push" "$GIT_HOOKS_DIR/pre-push"
-chmod +x "$GIT_HOOKS_DIR/pre-push"
+  echo "✔ installed $(basename "$src") → $dst"
+}
 
-echo "✓ Pre-push hook installed"
+install_for_dir() {
+  local hook_dir="$1"
+
+  for hook in "$HOOK_SOURCE_DIR"/*; do
+    local name
+    name="$(basename "$hook")"
+    local target="$hook_dir/$name"
+
+    copy_hook "$hook" "$target"
+  done
+}
+
+echo "Installing hooks from $HOOK_SOURCE_DIR …"
+
+# main repo
+install_for_dir "$GIT_DIR/hooks"
+
+# worktrees
+for wt in "$GIT_DIR"/worktrees/*; do
+  if [ -d "$wt" ]; then
+    install_for_dir "$wt/hooks"
+  fi
+done
+
+echo "All hooks installed successfully."
