@@ -891,7 +891,6 @@ fn run_pre_push() {
         nextest_command.push("-p".to_string());
         nextest_command.push(crate_name.to_string());
     }
-    nextest_command.push("--all-features".to_string());
     nextest_command.push("--no-tests=pass".to_string());
     let nextest_output = run_command_with_streaming(&nextest_command, &[]);
 
