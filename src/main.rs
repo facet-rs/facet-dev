@@ -482,6 +482,80 @@ fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>)
     }
 }
 
+fn shell_escape(part: &str) -> String {
+    if part
+        .chars()
+        .all(|c| !c.is_whitespace() && c != '"' && c != '\'' && c != '\\')
+    {
+        part.to_string()
+    } else {
+        format!("{:?}", part)
+    }
+}
+
+fn format_command_line(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|p| shell_escape(p))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn print_stream(label: &str, data: &[u8]) {
+    if data.is_empty() {
+        println!("    {}: <empty>", label);
+    } else {
+        println!(
+            "    {}:\n{}",
+            label,
+            String::from_utf8_lossy(data).trim_end()
+        );
+    }
+}
+
+fn print_env_vars(envs: &[(&str, &str)]) {
+    for (key, value) in envs {
+        println!("    env: {}={}", key, value);
+    }
+}
+
+fn exit_with_command_failure(
+    command: &[String],
+    envs: &[(&str, &str)],
+    output: std::process::Output,
+) -> ! {
+    println!("    command: {}", format_command_line(command));
+    if !envs.is_empty() {
+        print_env_vars(envs);
+    }
+    match output.status.code() {
+        Some(code) => println!("    exit code: {}", code),
+        None => println!("    exit code: terminated by signal"),
+    }
+    print_stream("stdout", &output.stdout);
+    print_stream("stderr", &output.stderr);
+    std::process::exit(1);
+}
+
+fn exit_with_command_error(command: &[String], envs: &[(&str, &str)], error: std::io::Error) -> ! {
+    println!("    command: {}", format_command_line(command));
+    if !envs.is_empty() {
+        print_env_vars(envs);
+    }
+    println!("    error: {}", error);
+    std::process::exit(1);
+}
+
+fn should_skip_doc_tests(output: &std::process::Output) -> bool {
+    if output.status.code() != Some(101) {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr.contains("there is nothing to test")
+        || stderr.contains("found no library targets to test")
+        || stderr.contains("found no binaries to test")
+}
+
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
@@ -623,7 +697,7 @@ fn run_pre_push() {
             .yellow()
     );
 
-    let mut all_passed = true;
+    let all_passed = true;
 
     for crate_name in &affected_crates {
         println!(
@@ -635,14 +709,22 @@ fn run_pre_push() {
         // Run clippy
         print!("  {} Running clippy... ", "🔍".cyan());
         io::stdout().flush().unwrap();
-        let clippy_output = Command::new("cargo")
-            .arg("clippy")
-            .arg("-p")
-            .arg(crate_name)
-            .arg("--all-targets")
-            .arg("--all-features")
-            .args(["--", "-D", "warnings"])
-            .output();
+        let clippy_command = vec![
+            "cargo".to_string(),
+            "clippy".to_string(),
+            "-p".to_string(),
+            crate_name.to_string(),
+            "--all-targets".to_string(),
+            "--all-features".to_string(),
+            "--".to_string(),
+            "-D".to_string(),
+            "warnings".to_string(),
+        ];
+        let mut clippy_cmd = Command::new(&clippy_command[0]);
+        for arg in &clippy_command[1..] {
+            clippy_cmd.arg(arg);
+        }
+        let clippy_output = clippy_cmd.output();
 
         match clippy_output {
             Ok(output) if output.status.success() => {
@@ -650,102 +732,98 @@ fn run_pre_push() {
             }
             Ok(output) => {
                 println!("{}", "failed".red());
-                if !output.stdout.is_empty() {
-                    println!(
-                        "    stdout:\n{}",
-                        String::from_utf8_lossy(&output.stdout).trim_end()
-                    );
-                }
-                if !output.stderr.is_empty() {
-                    println!(
-                        "    stderr:\n{}",
-                        String::from_utf8_lossy(&output.stderr).trim_end()
-                    );
-                }
-                all_passed = false;
+                exit_with_command_failure(&clippy_command, &[], output);
             }
             Err(e) => {
                 println!("{}", "failed".red());
-                println!("    error running cargo clippy: {e}");
-                all_passed = false;
+                exit_with_command_error(&clippy_command, &[], e);
             }
         }
 
         // Run tests
         print!("  {} Running nextest... ", "🧪".cyan());
         io::stdout().flush().unwrap();
-        let test_status = Command::new("cargo")
-            .arg("nextest")
-            .arg("run")
-            .arg("-p")
-            .arg(crate_name)
-            .arg("--all-features")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let nextest_command = vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+            "-p".to_string(),
+            crate_name.to_string(),
+            "--all-features".to_string(),
+        ];
+        let mut nextest_cmd = Command::new(&nextest_command[0]);
+        for arg in &nextest_command[1..] {
+            nextest_cmd.arg(arg);
+        }
+        let nextest_output = nextest_cmd.output();
 
-        match test_status {
-            Ok(status) if status.success() => {
+        match nextest_output {
+            Ok(output) if output.status.success() => {
                 println!("{}", "passed".green());
             }
-            _ => {
+            Ok(output) => {
                 println!("{}", "failed".red());
-                all_passed = false;
+                exit_with_command_failure(&nextest_command, &[], output);
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                exit_with_command_error(&nextest_command, &[], e);
             }
         }
 
         // Run doc tests
         print!("  {} Running doc tests... ", "📚".cyan());
         io::stdout().flush().unwrap();
-        let doctest_output = Command::new("cargo")
-            .arg("test")
-            .arg("--doc")
-            .arg("-p")
-            .arg(crate_name)
-            .arg("--all-features")
-            .output();
+        let doctest_command = vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "--doc".to_string(),
+            "-p".to_string(),
+            crate_name.to_string(),
+            "--all-features".to_string(),
+        ];
+        let mut doctest_cmd = Command::new(&doctest_command[0]);
+        for arg in &doctest_command[1..] {
+            doctest_cmd.arg(arg);
+        }
+        let doctest_output = doctest_cmd.output();
 
         match doctest_output {
             Ok(output) if output.status.success() => {
                 println!("{}", "passed".green());
             }
-            Ok(output) if output.status.code() == Some(101) => {
-                // Exit code 101 often means "no tests to run"
+            Ok(output) if should_skip_doc_tests(&output) => {
                 println!("{}", "skipped (no lib)".yellow());
             }
             Ok(output) => {
                 println!("{}", "failed".red());
-                if !output.stdout.is_empty() {
-                    println!(
-                        "    stdout:\n{}",
-                        String::from_utf8_lossy(&output.stdout).trim_end()
-                    );
-                }
-                if !output.stderr.is_empty() {
-                    println!(
-                        "    stderr:\n{}",
-                        String::from_utf8_lossy(&output.stderr).trim_end()
-                    );
-                }
-                all_passed = false;
+                exit_with_command_failure(&doctest_command, &[], output);
             }
             Err(e) => {
                 println!("{}", "failed".red());
-                println!("    error running cargo test --doc: {e}");
-                all_passed = false;
+                exit_with_command_error(&doctest_command, &[], e);
             }
         }
 
         // Build docs with warnings denied
         print!("  {} Building docs... ", "📖".cyan());
         io::stdout().flush().unwrap();
-        let doc_output = Command::new("cargo")
-            .arg("doc")
-            .arg("-p")
-            .arg(crate_name)
-            .arg("--all-features")
-            .env("RUSTDOCFLAGS", "-D warnings")
-            .output();
+        let doc_command = vec![
+            "cargo".to_string(),
+            "doc".to_string(),
+            "-p".to_string(),
+            crate_name.to_string(),
+            "--all-features".to_string(),
+        ];
+        let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
+        let mut doc_cmd = Command::new(&doc_command[0]);
+        for arg in &doc_command[1..] {
+            doc_cmd.arg(arg);
+        }
+        for (key, value) in &doc_env {
+            doc_cmd.env(key, value);
+        }
+        let doc_output = doc_cmd.output();
 
         match doc_output {
             Ok(output) if output.status.success() => {
@@ -753,24 +831,11 @@ fn run_pre_push() {
             }
             Ok(output) => {
                 println!("{}", "failed".red());
-                if !output.stdout.is_empty() {
-                    println!(
-                        "    stdout:\n{}",
-                        String::from_utf8_lossy(&output.stdout).trim_end()
-                    );
-                }
-                if !output.stderr.is_empty() {
-                    println!(
-                        "    stderr:\n{}",
-                        String::from_utf8_lossy(&output.stderr).trim_end()
-                    );
-                }
-                all_passed = false;
+                exit_with_command_failure(&doc_command, &doc_env, output);
             }
             Err(e) => {
                 println!("{}", "failed".red());
-                println!("    error running cargo doc: {e}");
-                all_passed = false;
+                exit_with_command_error(&doc_command, &doc_env, e);
             }
         }
     }
