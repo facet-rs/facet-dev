@@ -425,15 +425,18 @@ fn run_pre_push() {
     };
 
     // Get the list of changed files
+    let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
+
     let diff_output = Command::new("git")
         .args(["diff", "--name-only", &format!("{}...HEAD", merge_base)])
         .output();
 
-    let changed_files = match diff_output {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>(),
+    match diff_output {
+        Ok(output) if output.status.success() => {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                changed_files.insert(line.to_string());
+            }
+        }
         Err(e) => {
             error!("Failed to get changed files: {}", e);
             std::process::exit(1);
@@ -446,6 +449,32 @@ fn run_pre_push() {
             std::process::exit(1);
         }
     };
+
+    // Include currently staged files so local runs before committing still work
+    let staged_output = Command::new("git")
+        .args(["diff", "--name-only", "--cached"])
+        .output();
+
+    match staged_output {
+        Ok(output) if output.status.success() => {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                changed_files.insert(line.to_string());
+            }
+        }
+        Err(e) => {
+            error!("Failed to get staged files: {}", e);
+            std::process::exit(1);
+        }
+        Ok(output) => {
+            error!(
+                "git diff --cached failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let changed_files: Vec<_> = changed_files.into_iter().collect();
 
     if changed_files.is_empty() {
         println!("{}", "No changes detected".green().bold());
@@ -528,25 +557,51 @@ fn run_pre_push() {
         // Run clippy
         print!("  {} Running clippy... ", "🔍".cyan());
         io::stdout().flush().unwrap();
-        let clippy_status = Command::new("cargo")
-            .args(["clippy", "-p", crate_name, "--", "-D", "warnings"])
-            .status();
+        let clippy_output = Command::new("cargo")
+            .arg("clippy")
+            .arg("-p")
+            .arg(crate_name)
+            .arg("--all-targets")
+            .arg("--all-features")
+            .args(["--", "-D", "warnings"])
+            .output();
 
-        match clippy_status {
-            Ok(status) if status.success() => {
+        match clippy_output {
+            Ok(output) if output.status.success() => {
                 println!("{}", "passed".green());
             }
-            _ => {
+            Ok(output) => {
                 println!("{}", "failed".red());
+                if !output.stdout.is_empty() {
+                    println!(
+                        "    stdout:\n{}",
+                        String::from_utf8_lossy(&output.stdout).trim_end()
+                    );
+                }
+                if !output.stderr.is_empty() {
+                    println!(
+                        "    stderr:\n{}",
+                        String::from_utf8_lossy(&output.stderr).trim_end()
+                    );
+                }
+                all_passed = false;
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                println!("    error running cargo clippy: {e}");
                 all_passed = false;
             }
         }
 
         // Run tests
-        print!("  {} Running tests... ", "🧪".cyan());
+        print!("  {} Running nextest... ", "🧪".cyan());
         io::stdout().flush().unwrap();
         let test_status = Command::new("cargo")
-            .args(["test", "-p", crate_name])
+            .arg("nextest")
+            .arg("run")
+            .arg("-p")
+            .arg(crate_name)
+            .arg("--all-features")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -564,22 +619,79 @@ fn run_pre_push() {
         // Run doc tests
         print!("  {} Running doc tests... ", "📚".cyan());
         io::stdout().flush().unwrap();
-        let doctest_status = Command::new("cargo")
-            .args(["test", "--doc", "-p", crate_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let doctest_output = Command::new("cargo")
+            .arg("test")
+            .arg("--doc")
+            .arg("-p")
+            .arg(crate_name)
+            .arg("--all-features")
+            .output();
 
-        match doctest_status {
-            Ok(status) if status.success() => {
+        match doctest_output {
+            Ok(output) if output.status.success() => {
                 println!("{}", "passed".green());
             }
-            Ok(status) if status.code() == Some(101) => {
+            Ok(output) if output.status.code() == Some(101) => {
                 // Exit code 101 often means "no tests to run"
                 println!("{}", "skipped (no lib)".yellow());
             }
-            _ => {
+            Ok(output) => {
                 println!("{}", "failed".red());
+                if !output.stdout.is_empty() {
+                    println!(
+                        "    stdout:\n{}",
+                        String::from_utf8_lossy(&output.stdout).trim_end()
+                    );
+                }
+                if !output.stderr.is_empty() {
+                    println!(
+                        "    stderr:\n{}",
+                        String::from_utf8_lossy(&output.stderr).trim_end()
+                    );
+                }
+                all_passed = false;
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                println!("    error running cargo test --doc: {e}");
+                all_passed = false;
+            }
+        }
+
+        // Build docs with warnings denied
+        print!("  {} Building docs... ", "📖".cyan());
+        io::stdout().flush().unwrap();
+        let doc_output = Command::new("cargo")
+            .arg("doc")
+            .arg("-p")
+            .arg(crate_name)
+            .arg("--all-features")
+            .env("RUSTDOCFLAGS", "-D warnings")
+            .output();
+
+        match doc_output {
+            Ok(output) if output.status.success() => {
+                println!("{}", "passed".green());
+            }
+            Ok(output) => {
+                println!("{}", "failed".red());
+                if !output.stdout.is_empty() {
+                    println!(
+                        "    stdout:\n{}",
+                        String::from_utf8_lossy(&output.stdout).trim_end()
+                    );
+                }
+                if !output.stderr.is_empty() {
+                    println!(
+                        "    stderr:\n{}",
+                        String::from_utf8_lossy(&output.stderr).trim_end()
+                    );
+                }
+                all_passed = false;
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                println!("    error running cargo doc: {e}");
                 all_passed = false;
             }
         }
