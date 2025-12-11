@@ -682,6 +682,59 @@ fn run_command_with_streaming(
     }
 }
 
+fn debug_packages() {
+    use std::collections::HashSet;
+
+    println!("{}", "Loading workspace metadata...".cyan().bold());
+
+    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Failed to get workspace metadata: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    println!("{}", "\n📦 Workspace Members:".cyan().bold());
+    for member_id in &metadata.workspace_members {
+        if let Some(package) = metadata.packages.iter().find(|p| &p.id == member_id) {
+            println!(
+                "  ✓ {} ({})",
+                package.name,
+                package.manifest_path.parent().unwrap()
+            );
+        }
+    }
+
+    // Get the set of excluded crate names (those that are packages but not workspace members)
+    let workspace_member_ids: HashSet<_> = metadata
+        .workspace_members
+        .iter()
+        .map(|id| &id.repr)
+        .collect();
+
+    let excluded: Vec<_> = metadata
+        .packages
+        .iter()
+        .filter(|pkg| !workspace_member_ids.contains(&pkg.id.repr))
+        .collect();
+
+    if !excluded.is_empty() {
+        println!("{}", "\n🚫 Excluded Packages:".yellow().bold());
+        for package in excluded {
+            println!(
+                "  ✗ {} ({})",
+                package.name,
+                package.manifest_path.parent().unwrap()
+            );
+        }
+    } else {
+        println!("{}", "\n🚫 Excluded Packages: None".yellow().bold());
+    }
+
+    println!("\n✅ Total packages: {}", metadata.packages.len());
+}
+
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
@@ -1063,6 +1116,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "pre-push" {
         run_pre_push();
+        return;
+    }
+    if args.len() > 1 && args[1] == "debug-packages" {
+        debug_packages();
         return;
     }
 
