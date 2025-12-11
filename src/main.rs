@@ -466,6 +466,44 @@ fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>)
     }
 }
 
+fn enqueue_cargo_lock_jobs(sender: std::sync::mpsc::Sender<Job>) {
+    let lock_path = Path::new("Cargo.lock");
+
+    // Check if Cargo.lock has unstaged changes
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain", "Cargo.lock"])
+        .output();
+
+    if let Ok(output) = status_output {
+        let status = String::from_utf8_lossy(&output.stdout);
+
+        // If there are unstaged changes (starts with space in second column, meaning modified in working tree)
+        if status.contains(" M ") {
+            // Stage the Cargo.lock changes
+            if let Ok(content) = fs::read(lock_path) {
+                let old_content = Command::new("git")
+                    .args(["show", "HEAD:Cargo.lock"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| o.stdout);
+
+                let job = Job {
+                    path: lock_path.to_path_buf(),
+                    old_content,
+                    new_content: content,
+                    #[cfg(unix)]
+                    executable: false,
+                };
+
+                if let Err(e) = sender.send(job) {
+                    error!("Failed to send Cargo.lock job: {e}");
+                }
+            }
+        }
+    }
+}
+
 fn enqueue_arborium_jobs_sync() -> Vec<Job> {
     use std::collections::HashSet;
 
@@ -491,7 +529,8 @@ fn enqueue_arborium_jobs_sync() -> Vec<Job> {
         .collect();
 
     // Filter to get publishable workspace crates (excluding demos and test crates)
-    let arborium_header = br#"<script src="https://arborium.bearcove.eu/arborium.js" data-root-url="https://arborium.bearcove.eu" defer></script>"#;
+    let arborium_header = br#"<!-- Rustdoc doesn't highlight some languages natively -- let's do it ourselves: https://github.com/bearcove/arborium -->
+<script defer src="https://cdn.jsdelivr.net/npm/@arborium/arborium@1/dist/arborium.iife.js"></script>"#;
 
     for package in &metadata.packages {
         // Only process workspace members
@@ -558,6 +597,101 @@ fn enqueue_arborium_jobs_sync() -> Vec<Job> {
                                         executable: false,
                                     };
                                     jobs.push(job);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    jobs
+}
+
+fn enforce_rust_version_sync() -> Vec<Job> {
+    use std::collections::HashSet;
+
+    let mut jobs = Vec::new();
+
+    // Load workspace metadata to get all publishable crates
+    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
+        Ok(m) => m,
+        Err(e) => {
+            error!(
+                "Failed to load workspace metadata for rust-version check: {}",
+                e
+            );
+            return jobs;
+        }
+    };
+
+    // Get workspace members
+    let workspace_member_ids: HashSet<_> = metadata
+        .workspace_members
+        .iter()
+        .map(|id| &id.repr)
+        .collect();
+
+    // Check each workspace crate for rust-version
+    for package in &metadata.packages {
+        // Only process workspace members
+        if !workspace_member_ids.contains(&package.id.repr) {
+            continue;
+        }
+
+        // Skip non-library crates that we don't need to track
+        if package.name.contains("test") || package.name.contains("example") {
+            continue;
+        }
+
+        if let Some(manifest_dir) = package.manifest_path.parent() {
+            let cargo_toml_path: PathBuf = manifest_dir.into();
+            if cargo_toml_path.exists() {
+                if let Ok(content) = fs::read_to_string(&cargo_toml_path) {
+                    // Check if rust-version is present
+                    if !content.contains("rust-version") {
+                        // Add rust-version = "1.87"
+                        let mut new_content = content.clone();
+
+                        // Find [package] section and add rust-version after description or other fields
+                        if let Some(package_pos) = new_content.find("[package]") {
+                            // Find the end of the [package] section (next [section])
+                            let section_content_start = package_pos + "[package]".len();
+                            if let Some(next_section_pos) =
+                                new_content[section_content_start..].find("\n[")
+                            {
+                                let insert_pos = section_content_start + next_section_pos;
+                                new_content.insert_str(insert_pos, "\nrust-version = \"1.87\"");
+
+                                if new_content != content {
+                                    let job = Job {
+                                        path: cargo_toml_path.clone().into(),
+                                        old_content: Some(content.into_bytes()),
+                                        new_content: new_content.into_bytes(),
+                                        #[cfg(unix)]
+                                        executable: false,
+                                    };
+                                    jobs.push(job);
+                                }
+                            } else {
+                                // No next section found, so we're at the end. Insert before first dependency/feature section
+                                if let Some(deps_pos) =
+                                    new_content[section_content_start..].find("\n[")
+                                {
+                                    let insert_pos = section_content_start + deps_pos;
+                                    new_content.insert_str(insert_pos, "\nrust-version = \"1.87\"");
+
+                                    if new_content != content {
+                                        let job = Job {
+                                            path: cargo_toml_path.clone().into(),
+                                            old_content: Some(content.into_bytes()),
+                                            new_content: new_content.into_bytes(),
+                                            #[cfg(unix)]
+                                            executable: false,
+                                        };
+                                        jobs.push(job);
+                                    }
                                 }
                             }
                         }
@@ -1162,6 +1296,36 @@ fn run_pre_push() {
         }
     }
 
+    // Run cargo-shear to check for unused dependencies
+    print!(
+        "  {} Running cargo-shear to check for unused dependencies... ",
+        "🔍".cyan()
+    );
+    io::stdout().flush().unwrap();
+
+    let shear_command = vec![
+        "cargo".to_string(),
+        "shear".to_string(),
+        "--check".to_string(),
+    ];
+    let shear_output = match run_command_with_streaming(&shear_command, &[]) {
+        Ok(output) => output,
+        Err(e) => {
+            println!("{}", "failed".red());
+            exit_with_command_error(&shear_command, &[], e);
+        }
+    };
+
+    match shear_output {
+        output if output.status.success() => {
+            println!("{}", "passed".green());
+        }
+        output => {
+            println!("{}", "failed".red());
+            exit_with_command_failure(&shear_command, &[], output);
+        }
+    }
+
     println!();
     println!(
         "{} {}",
@@ -1322,16 +1486,25 @@ fn main() {
         }
     }));
 
+    handles.push(std::thread::spawn({
+        let sender = tx_job.clone();
+        move || {
+            enqueue_cargo_lock_jobs(sender);
+        }
+    }));
+
     drop(tx_job);
 
-    // Arborium setup runs synchronously before job processing to avoid concurrent TOML edits
+    // Arborium setup and rust-version enforcement run synchronously before job processing to avoid concurrent TOML edits
     let mut arborium_jobs = enqueue_arborium_jobs_sync();
+    let mut rust_version_jobs = enforce_rust_version_sync();
 
     let mut jobs: Vec<Job> = Vec::new();
     for job in rx_job {
         jobs.push(job);
     }
     jobs.append(&mut arborium_jobs);
+    jobs.append(&mut rust_version_jobs);
 
     for handle in handles.drain(..) {
         handle.join().unwrap();
