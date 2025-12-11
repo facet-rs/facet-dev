@@ -1207,7 +1207,20 @@ fn debug_packages() {
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
-    let config = load_facet_dev_config();
+    let mut config = load_facet_dev_config();
+
+    // HAVE_MERCY=1 skips slow checks (tests, doc tests, docs)
+    if std::env::var("HAVE_MERCY").is_ok() {
+        println!(
+            "{}",
+            "🙏 HAVE_MERCY mode: skipping slow checks (tests, doc tests, docs)"
+                .yellow()
+                .bold()
+        );
+        config.nextest = false;
+        config.doc_tests = false;
+        config.docs = false;
+    }
 
     println!("{}", "Running pre-push checks...".cyan().bold());
 
