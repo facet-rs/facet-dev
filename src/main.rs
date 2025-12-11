@@ -83,7 +83,7 @@ impl Job {
     }
 }
 
-fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
+fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Option<&Path>) {
     let workspace_dir = std::env::current_dir().unwrap();
     let entries = match fs_err::read_dir(&workspace_dir) {
         Ok(e) => e,
@@ -163,7 +163,16 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
 
         let crate_name = dir_name.to_string();
 
-        let template_path = if crate_name == "facet" {
+        // Check for custom template path (from --template-dir or config)
+        let template_path = if let Some(custom_dir) = template_dir {
+            let custom_path = custom_dir.join(&crate_name).with_extension("md.in");
+            if custom_path.exists() {
+                custom_path
+            } else {
+                // Fall back to crate's own template
+                crate_path.join(template_name)
+            }
+        } else if crate_name == "facet" {
             Path::new(template_name).to_path_buf()
         } else {
             crate_path.join(template_name)
@@ -1067,6 +1076,18 @@ fn main() {
         return;
     }
 
+    // Parse --template-dir argument
+    let mut template_dir: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--template-dir" && i + 1 < args.len() {
+            template_dir = Some(PathBuf::from(&args[i + 1]));
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
     let staged_files = match collect_staged_files() {
         Ok(sf) => sf,
         Err(e) => {
@@ -1085,8 +1106,9 @@ fn main() {
 
     handles.push(std::thread::spawn({
         let sender = tx_job.clone();
+        let template_dir = template_dir.clone();
         move || {
-            enqueue_readme_jobs(sender);
+            enqueue_readme_jobs(sender, template_dir.as_deref());
         }
     }));
 
