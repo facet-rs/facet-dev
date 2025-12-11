@@ -451,32 +451,6 @@ fn enqueue_github_funding_jobs(sender: std::sync::mpsc::Sender<Job>) {
 static CARGO_HUSKY_PRECOMMIT_HOOK: &str = include_str!(".cargo-husky/hooks/pre-commit");
 
 fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>) {
-    use std::process::Command;
-
-    // Check if cargo-husky is a dev dependency
-    let output = Command::new("cargo")
-        .arg("tree")
-        .arg("-e")
-        .arg("dev")
-        .arg("-i")
-        .arg("cargo-husky")
-        .output();
-
-    match output {
-        Ok(output) => {
-            if !output.status.success() {
-                error!("cargo-husky is not a dev dependency or cargo tree failed");
-                error!("To add cargo-husky as a dev dependency, run:");
-                error!("  cargo add cargo-husky --dev --no-default-features -F user-hooks");
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            error!("Failed to run cargo tree command: {e}");
-            std::process::exit(1);
-        }
-    }
-
     let hook_path = Path::new(".cargo-husky/hooks/pre-commit");
     let old_content = fs::read(hook_path).ok();
     let new_content = CARGO_HUSKY_PRECOMMIT_HOOK.as_bytes().to_vec();
