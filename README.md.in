@@ -145,12 +145,17 @@ This installs hooks that:
 
 ## Configuration
 
-facet-dev can be configured via `[workspace.metadata.facet-dev]` in your workspace `Cargo.toml`:
+facet-dev can be configured via `[package.metadata.facet-dev]` or `[workspace.metadata.facet-dev]` in your `Cargo.toml`. Package metadata takes precedence over workspace metadata.
 
 ```toml
-[workspace.metadata.facet-dev]
+# For single-crate projects:
+[package.metadata.facet-dev]
 generate-readmes = false  # Disable README generation (default: true)
 clippy = false            # Disable clippy checks on pre-push
+
+# For workspaces (applies to all crates):
+[workspace.metadata.facet-dev]
+generate-readmes = false
 ```
 
 ### Available Options

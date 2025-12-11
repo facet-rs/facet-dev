@@ -241,9 +241,14 @@ fn load_facet_dev_config() -> FacetDevConfig {
         }
     };
 
-    // workspace_metadata is serde_json::Value
-    // We're looking for: [workspace.metadata.facet-dev]
-    let facet_dev = match metadata.workspace_metadata.get("facet-dev") {
+    // Try [package.metadata.facet-dev] first (more specific), then fall back to
+    // [workspace.metadata.facet-dev]
+    let facet_dev = metadata
+        .root_package()
+        .and_then(|p| p.metadata.get("facet-dev"))
+        .or_else(|| metadata.workspace_metadata.get("facet-dev"));
+
+    let facet_dev = match facet_dev {
         Some(v) => v,
         None => return FacetDevConfig::default(),
     };
