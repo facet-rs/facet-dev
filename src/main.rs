@@ -844,6 +844,76 @@ fn run_pre_push() {
 
     println!("{}", "Running pre-push checks...".cyan().bold());
 
+    // Fetch to ensure origin/main is up to date
+    println!("  {} Fetching latest from origin...", "⬇️".cyan());
+    let fetch_output = Command::new("git")
+        .args(["fetch", "origin", "main"])
+        .output();
+
+    match fetch_output {
+        Ok(output) if !output.status.success() => {
+            error!(
+                "Failed to fetch from origin: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            error!("Failed to run git fetch: {}", e);
+            std::process::exit(1);
+        }
+        _ => {}
+    }
+
+    // Check if current branch is fast-forward to origin/main
+    let merge_base_output = Command::new("git")
+        .args(["merge-base", "HEAD", "origin/main"])
+        .output();
+
+    let merge_base = match merge_base_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            error!("Failed to find merge base with origin/main");
+            std::process::exit(1);
+        }
+    };
+
+    // Get current HEAD
+    let head_output = Command::new("git").args(["rev-parse", "HEAD"]).output();
+
+    let head = match head_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            error!("Failed to get HEAD");
+            std::process::exit(1);
+        }
+    };
+
+    // If merge-base != origin/main, we have non-fast-forward changes
+    if merge_base != head {
+        // Check if origin/main is ahead of merge_base
+        let origin_main = "origin/main";
+        let ahead_check = Command::new("git")
+            .args(["rev-parse", origin_main])
+            .output();
+
+        if let Ok(output) = ahead_check {
+            if output.status.success() {
+                let origin_main_rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if origin_main_rev != merge_base {
+                    error!("Your branch has diverged from origin/main");
+                    error!("Please rebase your changes:");
+                    error!("  git rebase origin/main");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     // Load workspace metadata
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
@@ -868,26 +938,11 @@ fn run_pre_push() {
         .map(|pkg| pkg.name.to_string())
         .collect();
 
-    // Find the merge base with origin/main
-    let merge_base_output = Command::new("git")
-        .args(["merge-base", "HEAD", "origin/main"])
-        .output();
-
-    let merge_base = match merge_base_output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => {
-            warn!("Failed to find merge base with origin/main, using HEAD");
-            "HEAD".to_string()
-        }
-    };
-
-    // Get the list of changed files
+    // Get the list of changed files between origin/main and HEAD
     let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
 
     let diff_output = Command::new("git")
-        .args(["diff", "--name-only", &format!("{}...HEAD", merge_base)])
+        .args(["diff", "--name-only", "origin/main", "HEAD"])
         .output();
 
     match diff_output {
@@ -903,30 +958,6 @@ fn run_pre_push() {
         Ok(output) => {
             error!(
                 "git diff failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            std::process::exit(1);
-        }
-    };
-
-    // Include currently staged files so local runs before committing still work
-    let staged_output = Command::new("git")
-        .args(["diff", "--name-only", "--cached"])
-        .output();
-
-    match staged_output {
-        Ok(output) if output.status.success() => {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                changed_files.insert(line.to_string());
-            }
-        }
-        Err(e) => {
-            error!("Failed to get staged files: {}", e);
-            std::process::exit(1);
-        }
-        Ok(output) => {
-            error!(
-                "git diff --cached failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
             std::process::exit(1);
