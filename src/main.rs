@@ -206,7 +206,22 @@ fn ensure_rust_version(document: &mut DocumentMut) -> bool {
 /// Configuration read from `[workspace.metadata.facet-dev]` in Cargo.toml
 #[derive(Debug)]
 struct FacetDevConfig {
+    // Pre-commit jobs
     generate_readmes: bool,
+    rustfmt: bool,
+    github_workflows: bool,
+    github_funding: bool,
+    cargo_husky_hooks: bool,
+    cargo_lock: bool,
+    arborium: bool,
+    rust_version: bool,
+
+    // Pre-push checks
+    clippy: bool,
+    nextest: bool,
+    doc_tests: bool,
+    docs: bool,
+    cargo_shear: bool,
 }
 
 fn load_facet_dev_config() -> FacetDevConfig {
@@ -219,24 +234,53 @@ fn load_facet_dev_config() -> FacetDevConfig {
     };
 
     // workspace_metadata is serde_json::Value
-    // We're looking for: [workspace.metadata.facet-dev] generate-readmes = false
+    // We're looking for: [workspace.metadata.facet-dev]
     let facet_dev = match metadata.workspace_metadata.get("facet-dev") {
         Some(v) => v,
         None => return FacetDevConfig::default(),
     };
 
-    let generate_readmes = facet_dev
-        .get("generate-readmes")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true); // default to true if not specified
+    let get_bool = |key: &str| -> Option<bool> { facet_dev.get(key).and_then(|v| v.as_bool()) };
 
-    FacetDevConfig { generate_readmes }
+    FacetDevConfig {
+        // Pre-commit jobs
+        generate_readmes: get_bool("generate-readmes").unwrap_or(true),
+        rustfmt: get_bool("rustfmt").unwrap_or(true),
+        github_workflows: get_bool("github-workflows").unwrap_or(true),
+        github_funding: get_bool("github-funding").unwrap_or(true),
+        cargo_husky_hooks: get_bool("cargo-husky-hooks").unwrap_or(true),
+        cargo_lock: get_bool("cargo-lock").unwrap_or(true),
+        arborium: get_bool("arborium").unwrap_or(true),
+        rust_version: get_bool("rust-version").unwrap_or(true),
+
+        // Pre-push checks
+        clippy: get_bool("clippy").unwrap_or(true),
+        nextest: get_bool("nextest").unwrap_or(true),
+        doc_tests: get_bool("doc-tests").unwrap_or(true),
+        docs: get_bool("docs").unwrap_or(true),
+        cargo_shear: get_bool("cargo-shear").unwrap_or(true),
+    }
 }
 
 impl Default for FacetDevConfig {
     fn default() -> Self {
         Self {
-            generate_readmes: true, // enabled by default
+            // Pre-commit jobs
+            generate_readmes: true,
+            rustfmt: true,
+            github_workflows: true,
+            github_funding: true,
+            cargo_husky_hooks: true,
+            cargo_lock: true,
+            arborium: true,
+            rust_version: true,
+
+            // Pre-push checks
+            clippy: true,
+            nextest: true,
+            doc_tests: true,
+            docs: true,
+            cargo_shear: true,
         }
     }
 }
@@ -1167,6 +1211,8 @@ fn debug_packages() {
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
+    let config = load_facet_dev_config();
+
     println!("{}", "Running pre-push checks...".cyan().bold());
 
     // Fetch to ensure origin/main is up to date
@@ -1363,191 +1409,203 @@ fn run_pre_push() {
     println!();
 
     // Run clippy once with all affected crates
-    print!(
-        "  {} Running clippy for all affected crates... ",
-        "🔍".cyan()
-    );
-    io::stdout().flush().unwrap();
-    let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
-    for crate_name in &affected_crates {
-        clippy_command.push("-p".to_string());
-        clippy_command.push(crate_name.to_string());
-    }
-    clippy_command.extend(vec![
-        "--all-targets".to_string(),
-        "--all-features".to_string(),
-        "--".to_string(),
-        "-D".to_string(),
-        "warnings".to_string(),
-    ]);
-    let clippy_output = run_command_with_streaming(&clippy_command, &[]);
+    if config.clippy {
+        print!(
+            "  {} Running clippy for all affected crates... ",
+            "🔍".cyan()
+        );
+        io::stdout().flush().unwrap();
+        let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
+        for crate_name in &affected_crates {
+            clippy_command.push("-p".to_string());
+            clippy_command.push(crate_name.to_string());
+        }
+        clippy_command.extend(vec![
+            "--all-targets".to_string(),
+            "--all-features".to_string(),
+            "--".to_string(),
+            "-D".to_string(),
+            "warnings".to_string(),
+        ]);
+        let clippy_output = run_command_with_streaming(&clippy_command, &[]);
 
-    match clippy_output {
-        Ok(output) if output.status.success() => {
-            println!("{}", "passed".green());
-        }
-        Ok(output) => {
-            println!("{}", "failed".red());
-            let hint_command = clippy_command.clone();
-            exit_with_command_failure(
-                &clippy_command,
-                &[],
-                output,
-                Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
-            );
-        }
-        Err(e) => {
-            println!("{}", "failed".red());
-            let hint_command = clippy_command.clone();
-            exit_with_command_error(
-                &clippy_command,
-                &[],
-                e,
-                Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
-            );
+        match clippy_output {
+            Ok(output) if output.status.success() => {
+                println!("{}", "passed".green());
+            }
+            Ok(output) => {
+                println!("{}", "failed".red());
+                let hint_command = clippy_command.clone();
+                exit_with_command_failure(
+                    &clippy_command,
+                    &[],
+                    output,
+                    Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
+                );
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                let hint_command = clippy_command.clone();
+                exit_with_command_error(
+                    &clippy_command,
+                    &[],
+                    e,
+                    Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
+                );
+            }
         }
     }
 
     // Run nextest once with all affected crates (better feature unification)
-    print!(
-        "  {} Running nextest for all affected crates... ",
-        "🧪".cyan()
-    );
-    io::stdout().flush().unwrap();
-    let mut nextest_command = vec![
-        "cargo".to_string(),
-        "nextest".to_string(),
-        "run".to_string(),
-    ];
-    for crate_name in &affected_crates {
-        nextest_command.push("-p".to_string());
-        nextest_command.push(crate_name.to_string());
-    }
-    nextest_command.push("--no-tests=pass".to_string());
-    let nextest_output = run_command_with_streaming(&nextest_command, &[]);
+    if config.nextest {
+        print!(
+            "  {} Running nextest for all affected crates... ",
+            "🧪".cyan()
+        );
+        io::stdout().flush().unwrap();
+        let mut nextest_command = vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+        ];
+        for crate_name in &affected_crates {
+            nextest_command.push("-p".to_string());
+            nextest_command.push(crate_name.to_string());
+        }
+        nextest_command.push("--no-tests=pass".to_string());
+        let nextest_output = run_command_with_streaming(&nextest_command, &[]);
 
-    match nextest_output {
-        Ok(output) if output.status.success() => {
-            println!("{}", "passed".green());
-        }
-        Ok(output) => {
-            println!("{}", "failed".red());
-            exit_with_command_failure(&nextest_command, &[], output, None);
-        }
-        Err(e) => {
-            println!("{}", "failed".red());
-            exit_with_command_error(&nextest_command, &[], e, None);
+        match nextest_output {
+            Ok(output) if output.status.success() => {
+                println!("{}", "passed".green());
+            }
+            Ok(output) => {
+                println!("{}", "failed".red());
+                exit_with_command_failure(&nextest_command, &[], output, None);
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                exit_with_command_error(&nextest_command, &[], e, None);
+            }
         }
     }
 
     // Run doc tests once with all affected crates
-    print!(
-        "  {} Running doc tests for all affected crates... ",
-        "📚".cyan()
-    );
-    io::stdout().flush().unwrap();
-    let mut doctest_command = vec!["cargo".to_string(), "test".to_string(), "--doc".to_string()];
-    for crate_name in &affected_crates {
-        doctest_command.push("-p".to_string());
-        doctest_command.push(crate_name.to_string());
-    }
-    doctest_command.push("--all-features".to_string());
-    let doctest_output = run_command_with_streaming(&doctest_command, &[]);
+    if config.doc_tests {
+        print!(
+            "  {} Running doc tests for all affected crates... ",
+            "📚".cyan()
+        );
+        io::stdout().flush().unwrap();
+        let mut doctest_command =
+            vec!["cargo".to_string(), "test".to_string(), "--doc".to_string()];
+        for crate_name in &affected_crates {
+            doctest_command.push("-p".to_string());
+            doctest_command.push(crate_name.to_string());
+        }
+        doctest_command.push("--all-features".to_string());
+        let doctest_output = run_command_with_streaming(&doctest_command, &[]);
 
-    match doctest_output {
-        Ok(output) if output.status.success() => {
-            println!("{}", "passed".green());
-        }
-        Ok(output) if should_skip_doc_tests(&output) => {
-            println!("{}", "skipped (no lib)".yellow());
-        }
-        Ok(output) => {
-            println!("{}", "failed".red());
-            exit_with_command_failure(&doctest_command, &[], output, None);
-        }
-        Err(e) => {
-            println!("{}", "failed".red());
-            exit_with_command_error(&doctest_command, &[], e, None);
+        match doctest_output {
+            Ok(output) if output.status.success() => {
+                println!("{}", "passed".green());
+            }
+            Ok(output) if should_skip_doc_tests(&output) => {
+                println!("{}", "skipped (no lib)".yellow());
+            }
+            Ok(output) => {
+                println!("{}", "failed".red());
+                exit_with_command_failure(&doctest_command, &[], output, None);
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                exit_with_command_error(&doctest_command, &[], e, None);
+            }
         }
     }
 
     // Build docs once with all affected crates
-    print!(
-        "  {} Building docs for all affected crates... ",
-        "📖".cyan()
-    );
-    io::stdout().flush().unwrap();
-    let mut doc_command = vec!["cargo".to_string(), "doc".to_string()];
-    for crate_name in &affected_crates {
-        doc_command.push("-p".to_string());
-        doc_command.push(crate_name.to_string());
-    }
-    doc_command.push("--all-features".to_string());
-    let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
-    let mut doc_cmd = command_with_color(&doc_command[0]);
-    for arg in &doc_command[1..] {
-        doc_cmd.arg(arg);
-    }
-    for (key, value) in &doc_env {
-        doc_cmd.env(key, value);
-    }
-    let doc_output = doc_cmd.output();
+    if config.docs {
+        print!(
+            "  {} Building docs for all affected crates... ",
+            "📖".cyan()
+        );
+        io::stdout().flush().unwrap();
+        let mut doc_command = vec!["cargo".to_string(), "doc".to_string()];
+        for crate_name in &affected_crates {
+            doc_command.push("-p".to_string());
+            doc_command.push(crate_name.to_string());
+        }
+        doc_command.push("--all-features".to_string());
+        let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
+        let mut doc_cmd = command_with_color(&doc_command[0]);
+        for arg in &doc_command[1..] {
+            doc_cmd.arg(arg);
+        }
+        for (key, value) in &doc_env {
+            doc_cmd.env(key, value);
+        }
+        let doc_output = doc_cmd.output();
 
-    match doc_output {
-        Ok(output) if output.status.success() => {
-            println!("{}", "passed".green());
-        }
-        Ok(output) => {
-            println!("{}", "failed".red());
-            exit_with_command_failure(&doc_command, &doc_env, output, None);
-        }
-        Err(e) => {
-            println!("{}", "failed".red());
-            exit_with_command_error(&doc_command, &doc_env, e, None);
+        match doc_output {
+            Ok(output) if output.status.success() => {
+                println!("{}", "passed".green());
+            }
+            Ok(output) => {
+                println!("{}", "failed".red());
+                exit_with_command_failure(&doc_command, &doc_env, output, None);
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                exit_with_command_error(&doc_command, &doc_env, e, None);
+            }
         }
     }
 
     // Run cargo-shear to check for unused dependencies
-    print!(
-        "  {} Running cargo-shear to check for unused dependencies... ",
-        "🔍".cyan()
-    );
-    io::stdout().flush().unwrap();
+    if config.cargo_shear {
+        print!(
+            "  {} Running cargo-shear to check for unused dependencies... ",
+            "🔍".cyan()
+        );
+        io::stdout().flush().unwrap();
 
-    let shear_command = vec!["cargo".to_string(), "shear".to_string()];
-    let mut shear_output = match run_command_with_streaming(&shear_command, &[]) {
-        Ok(output) => output,
-        Err(e) => {
-            println!("{}", "failed".red());
-            exit_with_command_error(&shear_command, &[], e, None);
-        }
-    };
-
-    if !shear_output.status.success() && indicates_missing_cargo_subcommand(&shear_output, "shear")
-    {
-        println!("    {} cargo-shear not found; installing...", "ℹ️".cyan());
-        install_cargo_shear();
-        shear_output = match run_command_with_streaming(&shear_command, &[]) {
+        let shear_command = vec!["cargo".to_string(), "shear".to_string()];
+        let mut shear_output = match run_command_with_streaming(&shear_command, &[]) {
             Ok(output) => output,
             Err(e) => {
                 println!("{}", "failed".red());
                 exit_with_command_error(&shear_command, &[], e, None);
             }
         };
-    }
 
-    match shear_output {
-        output if output.status.success() => {
-            println!("{}", "passed".green());
+        if !shear_output.status.success()
+            && indicates_missing_cargo_subcommand(&shear_output, "shear")
+        {
+            println!("    {} cargo-shear not found; installing...", "ℹ️".cyan());
+            install_cargo_shear();
+            shear_output = match run_command_with_streaming(&shear_command, &[]) {
+                Ok(output) => output,
+                Err(e) => {
+                    println!("{}", "failed".red());
+                    exit_with_command_error(&shear_command, &[], e, None);
+                }
+            };
         }
-        output => {
-            println!("{}", "failed".red());
-            exit_with_command_failure(
-                &shear_command,
-                &[],
-                output,
-                Some(Box::new(print_shear_fix_hint)),
-            );
+
+        match shear_output {
+            output if output.status.success() => {
+                println!("{}", "passed".green());
+            }
+            output => {
+                println!("{}", "failed".red());
+                exit_with_command_failure(
+                    &shear_command,
+                    &[],
+                    output,
+                    Some(Box::new(print_shear_fix_hint)),
+                );
+            }
         }
     }
 
@@ -1688,46 +1746,64 @@ fn main() {
         }));
     }
 
-    handles.push(std::thread::spawn({
-        let sender = tx_job.clone();
-        move || {
-            enqueue_rustfmt_jobs(sender, &staged_files);
-        }
-    }));
+    if config.rustfmt {
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            move || {
+                enqueue_rustfmt_jobs(sender, &staged_files);
+            }
+        }));
+    }
 
-    handles.push(std::thread::spawn({
-        let sender = tx_job.clone();
-        move || {
-            enqueue_github_workflow_jobs(sender);
-        }
-    }));
+    if config.github_workflows {
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            move || {
+                enqueue_github_workflow_jobs(sender);
+            }
+        }));
+    }
 
-    handles.push(std::thread::spawn({
-        let sender = tx_job.clone();
-        move || {
-            enqueue_github_funding_jobs(sender);
-        }
-    }));
+    if config.github_funding {
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            move || {
+                enqueue_github_funding_jobs(sender);
+            }
+        }));
+    }
 
-    handles.push(std::thread::spawn({
-        let sender = tx_job.clone();
-        move || {
-            enqueue_cargo_husky_precommit_hook_jobs(sender);
-        }
-    }));
+    if config.cargo_husky_hooks {
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            move || {
+                enqueue_cargo_husky_precommit_hook_jobs(sender);
+            }
+        }));
+    }
 
-    handles.push(std::thread::spawn({
-        let sender = tx_job.clone();
-        move || {
-            enqueue_cargo_lock_jobs(sender);
-        }
-    }));
+    if config.cargo_lock {
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            move || {
+                enqueue_cargo_lock_jobs(sender);
+            }
+        }));
+    }
 
     drop(tx_job);
 
     // Arborium setup and rust-version enforcement run synchronously before job processing to avoid concurrent TOML edits
-    let mut arborium_jobs = enqueue_arborium_jobs_sync();
-    let mut rust_version_jobs = enforce_rust_version_sync();
+    let mut arborium_jobs = if config.arborium {
+        enqueue_arborium_jobs_sync()
+    } else {
+        Vec::new()
+    };
+    let mut rust_version_jobs = if config.rust_version {
+        enforce_rust_version_sync()
+    } else {
+        Vec::new()
+    };
 
     let mut jobs: Vec<Job> = Vec::new();
     for job in rx_job {

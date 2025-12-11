@@ -164,13 +164,35 @@ facet-dev can be configured via `[workspace.metadata.facet-dev]` in your workspa
 ```toml
 [workspace.metadata.facet-dev]
 generate-readmes = false  # Disable README generation (default: true)
+clippy = false            # Disable clippy checks on pre-push
 ```
 
 ### Available Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `generate-readmes` | bool | `true` | Generate `README.md` files from templates |
+All options default to `true`. Set to `false` to disable.
+
+#### Pre-commit Jobs
+
+| Option | Description |
+|--------|-------------|
+| `generate-readmes` | Generate `README.md` files from templates |
+| `rustfmt` | Run `cargo fmt` to format code |
+| `github-workflows` | Generate GitHub Actions workflow files |
+| `github-funding` | Generate `FUNDING.yml` |
+| `cargo-husky-hooks` | Install/update cargo-husky pre-commit hooks |
+| `cargo-lock` | Stage `Cargo.lock` changes |
+| `arborium` | Set up arborium syntax highlighting for docs |
+| `rust-version` | Enforce consistent MSRV across crates |
+
+#### Pre-push Checks
+
+| Option | Description |
+|--------|-------------|
+| `clippy` | Run `cargo clippy` with warnings as errors |
+| `nextest` | Run tests via `cargo nextest` |
+| `doc-tests` | Run documentation tests |
+| `docs` | Build documentation with warnings as errors |
+| `cargo-shear` | Check for unused dependencies |
 
 ## Notes
 
