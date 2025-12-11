@@ -26,6 +26,17 @@ fn command_with_color<S: AsRef<OsStr>>(program: S) -> Command {
     cmd
 }
 
+/// Returns true if the given path is gitignored.
+fn is_gitignored(path: &Path) -> bool {
+    Command::new("git")
+        .arg("check-ignore")
+        .arg("-q")
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone)]
 struct Job {
     path: PathBuf,
@@ -1715,6 +1726,7 @@ fn main() {
     }
 
     jobs.retain(|job| !job.is_noop());
+    jobs.retain(|job| !is_gitignored(&job.path));
     show_and_apply_jobs(&mut jobs);
 }
 
