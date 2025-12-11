@@ -559,10 +559,11 @@ fn should_skip_doc_tests(output: &std::process::Output) -> bool {
 }
 
 /// Runs a command with smart streaming behavior:
+/// - Shows elapsed time from the start
 /// - Buffers output for the first 5 seconds
 /// - If command completes within 5s, returns without printing
 /// - If it takes >5s, starts streaming output in real-time
-/// - Shows elapsed time during execution
+/// - Updates elapsed time every second during execution
 fn run_command_with_streaming(
     command: &[String],
     envs: &[(&str, &str)],
@@ -574,6 +575,10 @@ fn run_command_with_streaming(
     for (key, value) in envs {
         cmd.env(key, value);
     }
+
+    // Force color output with widely-respected environment variables
+    cmd.env("FORCE_COLOR", "1");
+    cmd.env("CARGO_TERM_COLOR", "always");
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -686,13 +691,21 @@ fn run_command_with_streaming(
                     got_output = true;
                 }
 
-                // Update timer display if streaming and enough time has passed
-                if streaming && last_update.elapsed() >= Duration::from_secs(1) {
-                    eprint!(
-                        "\r  {} Elapsed: {:.1}s",
-                        "⏱️".yellow(),
-                        elapsed.as_secs_f32()
-                    );
+                // Update timer display if enough time has passed
+                if last_update.elapsed() >= Duration::from_secs(1) {
+                    if streaming {
+                        eprint!(
+                            "\r  {} Elapsed: {:.1}s",
+                            "⏱️".yellow(),
+                            elapsed.as_secs_f32()
+                        );
+                    } else {
+                        eprint!(
+                            "\r  {} Elapsed: {:.1}s",
+                            "⏱️".yellow(),
+                            elapsed.as_secs_f32()
+                        );
+                    }
                     io::stderr().flush().unwrap();
                     last_update = Instant::now();
                 }
@@ -849,43 +862,37 @@ fn run_pre_push() {
 
     println!();
 
-    // Run clippy for each crate individually (fast, per-crate feedback is useful)
+    // Run clippy once with all affected crates
+    print!(
+        "  {} Running clippy for all affected crates... ",
+        "🔍".cyan()
+    );
+    io::stdout().flush().unwrap();
+    let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
     for crate_name in &affected_crates {
-        print!(
-            "  {} Running clippy for {}... ",
-            "🔍".cyan(),
-            crate_name.yellow()
-        );
-        io::stdout().flush().unwrap();
-        let clippy_command = vec![
-            "cargo".to_string(),
-            "clippy".to_string(),
-            "-p".to_string(),
-            crate_name.to_string(),
-            "--all-targets".to_string(),
-            "--all-features".to_string(),
-            "--".to_string(),
-            "-D".to_string(),
-            "warnings".to_string(),
-        ];
-        let mut clippy_cmd = Command::new(&clippy_command[0]);
-        for arg in &clippy_command[1..] {
-            clippy_cmd.arg(arg);
-        }
-        let clippy_output = clippy_cmd.output();
+        clippy_command.push("-p".to_string());
+        clippy_command.push(crate_name.to_string());
+    }
+    clippy_command.extend(vec![
+        "--all-targets".to_string(),
+        "--all-features".to_string(),
+        "--".to_string(),
+        "-D".to_string(),
+        "warnings".to_string(),
+    ]);
+    let clippy_output = run_command_with_streaming(&clippy_command, &[]);
 
-        match clippy_output {
-            Ok(output) if output.status.success() => {
-                println!("{}", "passed".green());
-            }
-            Ok(output) => {
-                println!("{}", "failed".red());
-                exit_with_command_failure(&clippy_command, &[], output);
-            }
-            Err(e) => {
-                println!("{}", "failed".red());
-                exit_with_command_error(&clippy_command, &[], e);
-            }
+    match clippy_output {
+        Ok(output) if output.status.success() => {
+            println!("{}", "passed".green());
+        }
+        Ok(output) => {
+            println!("{}", "failed".red());
+            exit_with_command_failure(&clippy_command, &[], output);
+        }
+        Err(e) => {
+            println!("{}", "failed".red());
+            exit_with_command_error(&clippy_command, &[], e);
         }
     }
 
@@ -953,43 +960,39 @@ fn run_pre_push() {
         }
     }
 
-    // Build docs for each crate individually (per-crate feedback is useful)
+    // Build docs once with all affected crates
+    print!(
+        "  {} Building docs for all affected crates... ",
+        "📖".cyan()
+    );
+    io::stdout().flush().unwrap();
+    let mut doc_command = vec!["cargo".to_string(), "doc".to_string()];
     for crate_name in &affected_crates {
-        print!(
-            "  {} Building docs for {}... ",
-            "📖".cyan(),
-            crate_name.yellow()
-        );
-        io::stdout().flush().unwrap();
-        let doc_command = vec![
-            "cargo".to_string(),
-            "doc".to_string(),
-            "-p".to_string(),
-            crate_name.to_string(),
-            "--all-features".to_string(),
-        ];
-        let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
-        let mut doc_cmd = Command::new(&doc_command[0]);
-        for arg in &doc_command[1..] {
-            doc_cmd.arg(arg);
-        }
-        for (key, value) in &doc_env {
-            doc_cmd.env(key, value);
-        }
-        let doc_output = doc_cmd.output();
+        doc_command.push("-p".to_string());
+        doc_command.push(crate_name.to_string());
+    }
+    doc_command.push("--all-features".to_string());
+    let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
+    let mut doc_cmd = Command::new(&doc_command[0]);
+    for arg in &doc_command[1..] {
+        doc_cmd.arg(arg);
+    }
+    for (key, value) in &doc_env {
+        doc_cmd.env(key, value);
+    }
+    let doc_output = doc_cmd.output();
 
-        match doc_output {
-            Ok(output) if output.status.success() => {
-                println!("{}", "passed".green());
-            }
-            Ok(output) => {
-                println!("{}", "failed".red());
-                exit_with_command_failure(&doc_command, &doc_env, output);
-            }
-            Err(e) => {
-                println!("{}", "failed".red());
-                exit_with_command_error(&doc_command, &doc_env, e);
-            }
+    match doc_output {
+        Ok(output) if output.status.success() => {
+            println!("{}", "passed".green());
+        }
+        Ok(output) => {
+            println!("{}", "failed".red());
+            exit_with_command_failure(&doc_command, &doc_env, output);
+        }
+        Err(e) => {
+            println!("{}", "failed".red());
+            exit_with_command_error(&doc_command, &doc_env, e);
         }
     }
 
