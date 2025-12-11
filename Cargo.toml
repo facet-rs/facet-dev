@@ -11,6 +11,9 @@ license = "MIT OR Apache-2.0"
 [package.metadata.docs.rs]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 cargo_metadata = "0.23.1"
 fs-err = "3.2.0"
