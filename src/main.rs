@@ -174,33 +174,111 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
     // Also handle the workspace/top-level README, if any
     let workspace_template_path = workspace_dir.join(template_name);
 
-    // Get workspace name from cargo tree
-    let workspace_name = match Command::new("cargo")
-        .arg("tree")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|child| {
-            let output = child.wait_with_output()?;
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    // Extract package name from "package-name v0.1.0 (/path/to/package)"
-                    if let Some(space_pos) = first_line.find(' ') {
-                        return Ok(first_line[..space_pos].to_string());
-                    }
-                }
-            }
-            Err(std::io::Error::other("Failed to parse cargo tree output"))
-        }) {
+    // Get workspace name from cargo metadata so we can use the declared default member
+    let workspace_name = match workspace_name_from_metadata(&workspace_dir) {
         Ok(name) => name,
-        Err(e) => {
-            warn!("Failed to get workspace name from cargo tree: {e}, falling back to 'facet'");
-            "facet".to_string()
+        Err(err) => {
+            let fallback = workspace_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("facet")
+                .to_string();
+            warn!(
+                "Failed to determine workspace name via cargo metadata: {err}, falling back to '{fallback}'"
+            );
+            fallback
         }
     };
 
     process_readme_template(&workspace_template_path, &workspace_dir, &workspace_name);
+}
+
+fn workspace_name_from_metadata(workspace_dir: &Path) -> Result<String, String> {
+    let manifest_path = workspace_dir.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return Err("Workspace manifest Cargo.toml not found".to_string());
+    }
+
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--no-deps")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to run cargo metadata: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "cargo metadata exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse cargo metadata output: {e}"))?;
+
+    if let Some(root_id) = metadata
+        .get("resolve")
+        .and_then(|resolve| resolve.get("root"))
+        .and_then(|root| root.as_str())
+    {
+        if let Some(name) = package_name_by_id(&metadata, root_id) {
+            return Ok(name.to_string());
+        }
+    }
+
+    if let Some(default_members) = metadata
+        .get("workspace_default_members")
+        .and_then(|members| members.as_array())
+    {
+        for member in default_members {
+            if let Some(member_id) = member.as_str() {
+                if let Some(name) = package_name_by_id(&metadata, member_id) {
+                    return Ok(name.to_string());
+                }
+            }
+        }
+    }
+
+    let canonical_manifest = fs::canonicalize(&manifest_path)
+        .map_err(|e| format!("Failed to canonicalize workspace manifest: {e}"))?;
+
+    if let Some(packages) = metadata
+        .get("packages")
+        .and_then(|packages| packages.as_array())
+    {
+        for pkg in packages {
+            if let (Some(name), Some(manifest_path_str)) = (
+                pkg.get("name").and_then(|n| n.as_str()),
+                pkg.get("manifest_path").and_then(|path| path.as_str()),
+            ) {
+                if let Ok(pkg_manifest_path) = fs::canonicalize(manifest_path_str) {
+                    if pkg_manifest_path == canonical_manifest {
+                        return Ok(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Err("Unable to match workspace manifest to any package".to_string())
+}
+
+fn package_name_by_id<'a>(metadata: &'a serde_json::Value, package_id: &str) -> Option<&'a str> {
+    let packages = metadata.get("packages")?.as_array()?;
+    for pkg in packages {
+        let id = pkg.get("id")?.as_str()?;
+        if id == package_id {
+            return pkg.get("name")?.as_str();
+        }
+    }
+    None
 }
 
 fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &StagedFiles) {
