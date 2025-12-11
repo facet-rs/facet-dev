@@ -1,5 +1,6 @@
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, error, warn};
 use owo_colors::{OwoColorize, Style};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 use std::{
@@ -16,6 +17,7 @@ struct Job {
     path: PathBuf,
     old_content: Option<Vec<u8>>,
     new_content: Vec<u8>,
+    #[cfg(unix)]
     executable: bool,
 }
 
@@ -26,15 +28,31 @@ impl Job {
                 if &self.new_content != old {
                     return false;
                 }
-                // Check if executable bit would change
-                let current_executable = self
-                    .path
-                    .metadata()
-                    .map(|m| m.permissions().mode() & 0o111 != 0)
-                    .unwrap_or(false);
-                current_executable == self.executable
+                #[cfg(unix)]
+                {
+                    // Check if executable bit would change
+                    let current_executable = self
+                        .path
+                        .metadata()
+                        .map(|m| m.permissions().mode() & 0o111 != 0)
+                        .unwrap_or(false);
+                    current_executable == self.executable
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
             }
-            None => self.new_content.is_empty() && !self.executable,
+            None => {
+                #[cfg(unix)]
+                {
+                    self.new_content.is_empty() && !self.executable
+                }
+                #[cfg(not(unix))]
+                {
+                    self.new_content.is_empty()
+                }
+            }
         }
     }
 
@@ -51,6 +69,7 @@ impl Job {
         fs::write(&self.path, &self.new_content)?;
 
         // Set executable bit if needed
+        #[cfg(unix)]
         if self.executable {
             let mut perms = fs::metadata(&self.path)?.permissions();
             perms.set_mode(perms.mode() | 0o111);
@@ -103,6 +122,7 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>) {
             path: readme_path,
             old_content,
             new_content: readme_content.into_bytes(),
+            #[cfg(unix)]
             executable: false,
         };
 
@@ -283,6 +303,7 @@ fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &Sta
             path: path.clone(),
             old_content: Some(original),
             new_content: formatted,
+            #[cfg(unix)]
             executable: false,
         };
         if let Err(e) = sender.send(job) {
@@ -312,6 +333,7 @@ fn enqueue_github_workflow_jobs(sender: std::sync::mpsc::Sender<Job>) {
         path: workflow_path.to_path_buf(),
         old_content,
         new_content,
+        #[cfg(unix)]
         executable: false,
     };
     if let Err(e) = sender.send(job) {
@@ -330,6 +352,7 @@ fn enqueue_github_funding_jobs(sender: std::sync::mpsc::Sender<Job>) {
         path: funding_path.to_path_buf(),
         old_content,
         new_content,
+        #[cfg(unix)]
         executable: false,
     };
     if let Err(e) = sender.send(job) {
@@ -373,6 +396,7 @@ fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>)
         path: hook_path.to_path_buf(),
         old_content,
         new_content,
+        #[cfg(unix)]
         executable: true,
     };
     if let Err(e) = sender.send(job) {
