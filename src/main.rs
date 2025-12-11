@@ -4,14 +4,27 @@ use owo_colors::{OwoColorize, Style};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 use std::{
+    ffi::OsStr,
     fs,
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 mod readme;
+
+fn apply_color_env(cmd: &mut Command) {
+    cmd.env("FORCE_COLOR", "1");
+    cmd.env("CARGO_TERM_COLOR", "always");
+}
+
+fn command_with_color<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    apply_color_env(&mut cmd);
+    cmd
+}
 
 #[derive(Debug, Clone)]
 struct Job {
@@ -60,7 +73,6 @@ impl Job {
     /// Applies the job by writing out the new_content to path and staging the file.
     fn apply(&self) -> std::io::Result<()> {
         use std::fs;
-        use std::process::Command;
 
         // Create parent directories if they don't exist
         if let Some(parent) = self.path.parent() {
@@ -78,9 +90,117 @@ impl Job {
         }
 
         // Now stage it, best effort
-        let _ = Command::new("git").arg("add").arg(&self.path).status();
+        let _ = command_with_color("git")
+            .arg("add")
+            .arg(&self.path)
+            .status();
         Ok(())
     }
+}
+
+fn ensure_table(item: &mut Item) -> &mut Table {
+    if !item.is_table() {
+        *item = Item::Table(Table::new());
+    }
+    item.as_table_mut().expect("item to be a table")
+}
+
+fn rewrite_cargo_toml<F>(cargo_toml_path: &Path, mut transform: F) -> Option<Job>
+where
+    F: FnMut(&mut DocumentMut) -> bool,
+{
+    let content = fs::read_to_string(cargo_toml_path).ok()?;
+    let mut document: DocumentMut = match content.parse() {
+        Ok(doc) => doc,
+        Err(e) => {
+            error!(
+                "Failed to parse {} as TOML: {}",
+                cargo_toml_path.display(),
+                e
+            );
+            return None;
+        }
+    };
+
+    if !transform(&mut document) {
+        return None;
+    }
+
+    let new_content = document.to_string();
+    if new_content == content {
+        return None;
+    }
+
+    Some(Job {
+        path: cargo_toml_path.to_path_buf(),
+        old_content: Some(content.into_bytes()),
+        new_content: new_content.into_bytes(),
+        #[cfg(unix)]
+        executable: false,
+    })
+}
+
+fn array_matches(array: &Array, expected: &[&str]) -> bool {
+    if array.len() != expected.len() {
+        return false;
+    }
+
+    array
+        .iter()
+        .zip(expected.iter())
+        .all(|(value, expected_value)| value.as_str() == Some(*expected_value))
+}
+
+fn ensure_docsrs_metadata(document: &mut DocumentMut) -> bool {
+    let package_table = match document.get_mut("package").and_then(Item::as_table_mut) {
+        Some(table) => table,
+        None => return false,
+    };
+
+    let metadata_table = ensure_table(
+        package_table
+            .entry("metadata")
+            .or_insert(Item::Table(Table::new())),
+    );
+    let docs_table = ensure_table(
+        metadata_table
+            .entry("docs.rs")
+            .or_insert(Item::Table(Table::new())),
+    );
+
+    let desired = ["--html-in-header", "arborium-header.html"];
+    let already_correct = match docs_table.get("rustdoc-args") {
+        Some(item) => item
+            .as_array()
+            .map(|array| array_matches(array, &desired))
+            .unwrap_or(false),
+        None => false,
+    };
+
+    if already_correct {
+        return false;
+    }
+
+    let mut args_array = Array::new();
+    for arg in desired {
+        args_array.push(Value::from(arg));
+    }
+    docs_table.insert("rustdoc-args", Item::Value(Value::Array(args_array)));
+    true
+}
+
+fn ensure_rust_version(document: &mut DocumentMut) -> bool {
+    let package_table = match document.get_mut("package").and_then(Item::as_table_mut) {
+        Some(table) => table,
+        None => return false,
+    };
+
+    if package_table.get("rust-version").and_then(Item::as_str) == Some("1.87") {
+        return false;
+    }
+
+    package_table.insert("rust-version", value("1.87"));
+    true
 }
 
 fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Option<&Path>) {
@@ -230,7 +350,7 @@ fn workspace_name_from_metadata(workspace_dir: &Path) -> Result<String, String> 
         return Err("Workspace manifest Cargo.toml not found".to_string());
     }
 
-    let output = Command::new("cargo")
+    let output = command_with_color("cargo")
         .arg("metadata")
         .arg("--format-version")
         .arg("1")
@@ -345,7 +465,7 @@ fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &Sta
 
         // Format the content via rustfmt (edition 2024)
         let start = Instant::now();
-        let cmd = Command::new("rustfmt")
+        let cmd = command_with_color("rustfmt")
             .arg("--edition")
             .arg("2024")
             .arg("--emit")
@@ -491,7 +611,7 @@ fn enqueue_cargo_lock_jobs(sender: std::sync::mpsc::Sender<Job>) {
     let lock_path = Path::new("Cargo.lock");
 
     // Check if Cargo.lock has unstaged changes
-    let status_output = Command::new("git")
+    let status_output = command_with_color("git")
         .args(["status", "--porcelain", "Cargo.lock"])
         .output();
 
@@ -502,7 +622,7 @@ fn enqueue_cargo_lock_jobs(sender: std::sync::mpsc::Sender<Job>) {
         if status.contains(" M ") {
             // Stage the Cargo.lock changes
             if let Ok(content) = fs::read(lock_path) {
-                let old_content = Command::new("git")
+                let old_content = command_with_color("git")
                     .args(["show", "HEAD:Cargo.lock"])
                     .output()
                     .ok()
@@ -587,41 +707,8 @@ fn enqueue_arborium_jobs_sync() -> Vec<Job> {
             // Also update Cargo.toml to add docsrs metadata if not present
             let cargo_toml_path = crate_dir.join("Cargo.toml");
             if cargo_toml_path.exists() {
-                if let Ok(content) = fs::read_to_string(&cargo_toml_path) {
-                    if !content.contains("rustdoc-args") {
-                        // Use simple string manipulation to add the docsrs metadata
-                        let mut new_content = content.clone();
-
-                        // If there's no [package.metadata.docs.rs] section, add it
-                        if !new_content.contains("[package.metadata.docs.rs]") {
-                            // Find where to insert it - after [package] section or at the end
-                            let insert_str = "\n[package.metadata.docs.rs]\nrustdoc-args = [\"--html-in-header\", \"arborium-header.html\"]\n";
-
-                            if let Some(package_pos) = new_content.find("[package]") {
-                                // Find the next section after [package] or end of file
-                                if let Some(next_section) =
-                                    new_content[package_pos + 9..].find("\n[")
-                                {
-                                    let insert_pos = package_pos + 9 + next_section;
-                                    new_content.insert_str(insert_pos, insert_str);
-                                } else {
-                                    // No next section, append at end
-                                    new_content.push_str(insert_str);
-                                }
-
-                                if new_content != content {
-                                    let job = Job {
-                                        path: cargo_toml_path.clone().into(),
-                                        old_content: Some(content.into_bytes()),
-                                        new_content: new_content.into_bytes(),
-                                        #[cfg(unix)]
-                                        executable: false,
-                                    };
-                                    jobs.push(job);
-                                }
-                            }
-                        }
-                    }
+                if let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_docsrs_metadata) {
+                    jobs.push(job);
                 }
             }
         }
@@ -669,54 +756,8 @@ fn enforce_rust_version_sync() -> Vec<Job> {
         if let Some(manifest_dir) = package.manifest_path.parent() {
             let cargo_toml_path: PathBuf = manifest_dir.into();
             if cargo_toml_path.exists() {
-                if let Ok(content) = fs::read_to_string(&cargo_toml_path) {
-                    // Check if rust-version is present
-                    if !content.contains("rust-version") {
-                        // Add rust-version = "1.87"
-                        let mut new_content = content.clone();
-
-                        // Find [package] section and add rust-version after description or other fields
-                        if let Some(package_pos) = new_content.find("[package]") {
-                            // Find the end of the [package] section (next [section])
-                            let section_content_start = package_pos + "[package]".len();
-                            if let Some(next_section_pos) =
-                                new_content[section_content_start..].find("\n[")
-                            {
-                                let insert_pos = section_content_start + next_section_pos;
-                                new_content.insert_str(insert_pos, "\nrust-version = \"1.87\"");
-
-                                if new_content != content {
-                                    let job = Job {
-                                        path: cargo_toml_path.clone().into(),
-                                        old_content: Some(content.into_bytes()),
-                                        new_content: new_content.into_bytes(),
-                                        #[cfg(unix)]
-                                        executable: false,
-                                    };
-                                    jobs.push(job);
-                                }
-                            } else {
-                                // No next section found, so we're at the end. Insert before first dependency/feature section
-                                if let Some(deps_pos) =
-                                    new_content[section_content_start..].find("\n[")
-                                {
-                                    let insert_pos = section_content_start + deps_pos;
-                                    new_content.insert_str(insert_pos, "\nrust-version = \"1.87\"");
-
-                                    if new_content != content {
-                                        let job = Job {
-                                            path: cargo_toml_path.clone().into(),
-                                            old_content: Some(content.into_bytes()),
-                                            new_content: new_content.into_bytes(),
-                                            #[cfg(unix)]
-                                            executable: false,
-                                        };
-                                        jobs.push(job);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Some(job) = rewrite_cargo_toml(&cargo_toml_path, ensure_rust_version) {
+                    jobs.push(job);
                 }
             }
         }
@@ -744,6 +785,89 @@ fn format_command_line(parts: &[String]) -> String {
         .join(" ")
 }
 
+fn cargo_subcommand_missing_message(stderr: &str, subcommand: &str) -> bool {
+    let stderr_lower = stderr.to_lowercase();
+    let patterns = [
+        format!("no such command: `{}`", subcommand),
+        format!("no such command: '{}'", subcommand),
+        format!("no such subcommand: `{}`", subcommand),
+        format!("no such subcommand: '{}'", subcommand),
+    ];
+    patterns
+        .iter()
+        .any(|pattern| stderr_lower.contains(&pattern.to_lowercase()))
+}
+
+fn indicates_missing_cargo_subcommand(output: &std::process::Output, subcommand: &str) -> bool {
+    cargo_subcommand_missing_message(&String::from_utf8_lossy(&output.stderr), subcommand)
+}
+
+fn print_clippy_fix_hint(command: &[String]) {
+    let mut fix_command = Vec::with_capacity(command.len() + 2);
+    let mut inserted = false;
+
+    for part in command {
+        if !inserted && part == "--" {
+            fix_command.push("--allow-dirty".to_string());
+            fix_command.push("--fix".to_string());
+            inserted = true;
+        }
+        fix_command.push(part.clone());
+    }
+
+    if !inserted {
+        fix_command.push("--allow-dirty".to_string());
+        fix_command.push("--fix".to_string());
+    }
+
+    println!(
+        "    {} Try auto-fixing with:\n        {}\n        git commit --amend --no-edit",
+        "💡".cyan(),
+        format_command_line(&fix_command)
+    );
+}
+
+fn print_shear_fix_hint() {
+    println!(
+        "    {} Try cleaning unused dependencies with:\n        cargo shear --fix",
+        "💡".cyan()
+    );
+}
+
+fn install_cargo_shear() {
+    println!(
+        "    {} Installing cargo-shear via cargo-binstall...",
+        "⬇️".cyan()
+    );
+    let binstall_command = vec![
+        "cargo".to_string(),
+        "binstall".to_string(),
+        "-y".to_string(),
+        "cargo-shear".to_string(),
+    ];
+    let binstall_output = match run_command_with_streaming(&binstall_command, &[]) {
+        Ok(output) => output,
+        Err(e) => {
+            println!("{}", "    cargo-binstall invocation failed".red());
+            exit_with_command_error(&binstall_command, &[], e, None);
+        }
+    };
+
+    if binstall_output.status.success() {
+        println!("{}", "    cargo-shear installed".green());
+        return;
+    }
+
+    println!("{}", "    cargo-binstall failed".red());
+    if indicates_missing_cargo_subcommand(&binstall_output, "binstall") {
+        println!(
+            "    {} Install cargo-binstall first: https://github.com/cargo-bins/cargo-binstall#installation",
+            "⚠️".yellow()
+        );
+    }
+    exit_with_command_failure(&binstall_command, &[], binstall_output, None);
+}
+
 fn print_stream(label: &str, data: &[u8]) {
     if data.is_empty() {
         println!("    {}: <empty>", label);
@@ -766,6 +890,7 @@ fn exit_with_command_failure(
     command: &[String],
     envs: &[(&str, &str)],
     output: std::process::Output,
+    hint: Option<Box<dyn FnOnce()>>,
 ) -> ! {
     println!("    command: {}", format_command_line(command));
     if !envs.is_empty() {
@@ -777,15 +902,26 @@ fn exit_with_command_failure(
     }
     print_stream("stdout", &output.stdout);
     print_stream("stderr", &output.stderr);
+    if let Some(action) = hint {
+        action();
+    }
     std::process::exit(1);
 }
 
-fn exit_with_command_error(command: &[String], envs: &[(&str, &str)], error: std::io::Error) -> ! {
+fn exit_with_command_error(
+    command: &[String],
+    envs: &[(&str, &str)],
+    error: std::io::Error,
+    hint: Option<Box<dyn FnOnce()>>,
+) -> ! {
     println!("    command: {}", format_command_line(command));
     if !envs.is_empty() {
         print_env_vars(envs);
     }
     println!("    error: {}", error);
+    if let Some(action) = hint {
+        action();
+    }
     std::process::exit(1);
 }
 
@@ -810,17 +946,13 @@ fn run_command_with_streaming(
     command: &[String],
     envs: &[(&str, &str)],
 ) -> Result<std::process::Output, std::io::Error> {
-    let mut cmd = Command::new(&command[0]);
+    let mut cmd = command_with_color(&command[0]);
     for arg in &command[1..] {
         cmd.arg(arg);
     }
     for (key, value) in envs {
         cmd.env(key, value);
     }
-
-    // Force color output with widely-respected environment variables
-    cmd.env("FORCE_COLOR", "1");
-    cmd.env("CARGO_TERM_COLOR", "always");
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1001,7 +1133,7 @@ fn run_pre_push() {
 
     // Fetch to ensure origin/main is up to date
     println!("  {} Fetching latest from origin...", "⬇️".cyan());
-    let fetch_output = Command::new("git")
+    let fetch_output = command_with_color("git")
         .args(["fetch", "origin", "main"])
         .output();
 
@@ -1021,7 +1153,7 @@ fn run_pre_push() {
     }
 
     // Check if current branch is fast-forward to origin/main
-    let merge_base_output = Command::new("git")
+    let merge_base_output = command_with_color("git")
         .args(["merge-base", "HEAD", "origin/main"])
         .output();
 
@@ -1036,7 +1168,9 @@ fn run_pre_push() {
     };
 
     // Get current HEAD
-    let head_output = Command::new("git").args(["rev-parse", "HEAD"]).output();
+    let head_output = command_with_color("git")
+        .args(["rev-parse", "HEAD"])
+        .output();
 
     let head = match head_output {
         Ok(output) if output.status.success() => {
@@ -1052,7 +1186,7 @@ fn run_pre_push() {
     if merge_base != head {
         // Check if origin/main is ahead of merge_base
         let origin_main = "origin/main";
-        let ahead_check = Command::new("git")
+        let ahead_check = command_with_color("git")
             .args(["rev-parse", origin_main])
             .output();
 
@@ -1077,6 +1211,7 @@ fn run_pre_push() {
             std::process::exit(1);
         }
     };
+    let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
 
     // Get the set of workspace member crate IDs
     let workspace_member_ids: HashSet<_> = metadata
@@ -1096,7 +1231,7 @@ fn run_pre_push() {
     // Get the list of changed files between origin/main and HEAD
     let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
 
-    let diff_output = Command::new("git")
+    let diff_output = command_with_color("git")
         .args(["diff", "--name-only", "origin/main", "HEAD"])
         .output();
 
@@ -1139,7 +1274,12 @@ fn run_pre_push() {
     let mut affected_crates = HashSet::new();
 
     for file in &changed_files {
-        let mut current_path = PathBuf::from(file);
+        let initial_path = Path::new(file);
+        let mut current_path = if initial_path.is_absolute() {
+            PathBuf::from(initial_path)
+        } else {
+            workspace_root.join(initial_path)
+        };
 
         // Find the crate directory by walking up the path
         loop {
@@ -1210,11 +1350,23 @@ fn run_pre_push() {
         }
         Ok(output) => {
             println!("{}", "failed".red());
-            exit_with_command_failure(&clippy_command, &[], output);
+            let hint_command = clippy_command.clone();
+            exit_with_command_failure(
+                &clippy_command,
+                &[],
+                output,
+                Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
+            );
         }
         Err(e) => {
             println!("{}", "failed".red());
-            exit_with_command_error(&clippy_command, &[], e);
+            let hint_command = clippy_command.clone();
+            exit_with_command_error(
+                &clippy_command,
+                &[],
+                e,
+                Some(Box::new(move || print_clippy_fix_hint(&hint_command))),
+            );
         }
     }
 
@@ -1242,11 +1394,11 @@ fn run_pre_push() {
         }
         Ok(output) => {
             println!("{}", "failed".red());
-            exit_with_command_failure(&nextest_command, &[], output);
+            exit_with_command_failure(&nextest_command, &[], output, None);
         }
         Err(e) => {
             println!("{}", "failed".red());
-            exit_with_command_error(&nextest_command, &[], e);
+            exit_with_command_error(&nextest_command, &[], e, None);
         }
     }
 
@@ -1273,11 +1425,11 @@ fn run_pre_push() {
         }
         Ok(output) => {
             println!("{}", "failed".red());
-            exit_with_command_failure(&doctest_command, &[], output);
+            exit_with_command_failure(&doctest_command, &[], output, None);
         }
         Err(e) => {
             println!("{}", "failed".red());
-            exit_with_command_error(&doctest_command, &[], e);
+            exit_with_command_error(&doctest_command, &[], e, None);
         }
     }
 
@@ -1294,7 +1446,7 @@ fn run_pre_push() {
     }
     doc_command.push("--all-features".to_string());
     let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
-    let mut doc_cmd = Command::new(&doc_command[0]);
+    let mut doc_cmd = command_with_color(&doc_command[0]);
     for arg in &doc_command[1..] {
         doc_cmd.arg(arg);
     }
@@ -1309,11 +1461,11 @@ fn run_pre_push() {
         }
         Ok(output) => {
             println!("{}", "failed".red());
-            exit_with_command_failure(&doc_command, &doc_env, output);
+            exit_with_command_failure(&doc_command, &doc_env, output, None);
         }
         Err(e) => {
             println!("{}", "failed".red());
-            exit_with_command_error(&doc_command, &doc_env, e);
+            exit_with_command_error(&doc_command, &doc_env, e, None);
         }
     }
 
@@ -1324,18 +1476,27 @@ fn run_pre_push() {
     );
     io::stdout().flush().unwrap();
 
-    let shear_command = vec![
-        "cargo".to_string(),
-        "shear".to_string(),
-        "--check".to_string(),
-    ];
-    let shear_output = match run_command_with_streaming(&shear_command, &[]) {
+    let shear_command = vec!["cargo".to_string(), "shear".to_string()];
+    let mut shear_output = match run_command_with_streaming(&shear_command, &[]) {
         Ok(output) => output,
         Err(e) => {
             println!("{}", "failed".red());
-            exit_with_command_error(&shear_command, &[], e);
+            exit_with_command_error(&shear_command, &[], e, None);
         }
     };
+
+    if !shear_output.status.success() && indicates_missing_cargo_subcommand(&shear_output, "shear")
+    {
+        println!("    {} cargo-shear not found; installing...", "ℹ️".cyan());
+        install_cargo_shear();
+        shear_output = match run_command_with_streaming(&shear_command, &[]) {
+            Ok(output) => output,
+            Err(e) => {
+                println!("{}", "failed".red());
+                exit_with_command_error(&shear_command, &[], e, None);
+            }
+        };
+    }
 
     match shear_output {
         output if output.status.success() => {
@@ -1343,7 +1504,12 @@ fn run_pre_push() {
         }
         output => {
             println!("{}", "failed".red());
-            exit_with_command_failure(&shear_command, &[], output);
+            exit_with_command_failure(
+                &shear_command,
+                &[],
+                output,
+                Some(Box::new(print_shear_fix_hint)),
+            );
         }
     }
 
@@ -1542,7 +1708,7 @@ struct StagedFiles {
 }
 
 fn collect_staged_files() -> io::Result<StagedFiles> {
-    let output = Command::new("git")
+    let output = command_with_color("git")
         .arg("status")
         .arg("--porcelain")
         .output()?;
