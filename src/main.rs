@@ -411,7 +411,13 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Optio
         process_readme_template(&template_path, &crate_path, &crate_name);
     }
 
-    // Also handle the workspace/top-level README, if any
+    // Also handle the workspace/top-level README, if there's a Cargo.toml
+    let workspace_cargo_toml = workspace_dir.join("Cargo.toml");
+    if !workspace_cargo_toml.exists() {
+        // No top-level Cargo.toml, skip workspace README
+        return;
+    }
+
     let workspace_template_path = workspace_dir.join(template_name);
 
     // Get workspace name from cargo metadata so we can use the declared default member
@@ -677,7 +683,7 @@ fn enqueue_arborium_jobs_sync() -> Vec<Job> {
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
         Err(e) => {
-            error!(
+            debug!(
                 "Failed to load workspace metadata for arborium setup: {}",
                 e
             );
@@ -749,7 +755,7 @@ fn enforce_rust_version_sync() -> Vec<Job> {
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
         Err(e) => {
-            error!(
+            debug!(
                 "Failed to load workspace metadata for rust-version check: {}",
                 e
             );
@@ -1104,8 +1110,13 @@ fn debug_packages() {
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
         Err(e) => {
-            // Check if this is an empty virtual workspace (no members)
             let err_str = e.to_string();
+            // No Cargo.toml in this directory - not a Rust project
+            if err_str.contains("could not find") {
+                println!("{}", "No Cargo.toml found, nothing to do".yellow());
+                std::process::exit(0);
+            }
+            // Check if this is an empty virtual workspace (no members)
             if err_str.contains("virtual manifest")
                 || err_str.contains("no members")
                 || err_str.contains("workspace has no members")
@@ -1253,8 +1264,16 @@ fn run_pre_push() {
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
         Err(e) => {
-            // Check if this is an empty virtual workspace (no members)
             let err_str = e.to_string();
+            // No Cargo.toml in this directory - not a Rust project
+            if err_str.contains("could not find") {
+                println!(
+                    "{}",
+                    "No Cargo.toml found, skipping pre-push checks".yellow()
+                );
+                std::process::exit(0);
+            }
+            // Check if this is an empty virtual workspace (no members)
             if err_str.contains("virtual manifest")
                 || err_str.contains("no members")
                 || err_str.contains("workspace has no members")
