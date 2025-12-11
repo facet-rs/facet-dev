@@ -687,6 +687,28 @@ fn run_pre_push() {
 
     println!("{}", "Running pre-push checks...".cyan().bold());
 
+    // Load workspace metadata
+    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Failed to get workspace metadata: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Get the set of excluded crate names from the workspace
+    let excluded_crates: HashSet<String> = metadata
+        .workspace_metadata
+        .get("exclude")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Find the merge base with origin/main
     let merge_base_output = Command::new("git")
         .args(["merge-base", "HEAD", "origin/main"])
@@ -759,53 +781,45 @@ fn run_pre_push() {
         std::process::exit(0);
     }
 
+    // Build a map from directory to crate name using workspace packages
+    let mut dir_to_crate: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for package in &metadata.packages {
+        if let Some(parent) = package.manifest_path.parent() {
+            dir_to_crate.insert(parent.to_string(), package.name.clone());
+        }
+    }
+
     // Find which crates are affected
     let mut affected_crates = HashSet::new();
 
     for file in &changed_files {
-        let path = Path::new(file);
+        let mut current_path = PathBuf::from(file);
 
-        // Find the crate directory by looking for Cargo.toml
-        let mut current = path;
-        while let Some(parent) = current.parent() {
-            let cargo_toml = if parent.as_os_str().is_empty() {
-                PathBuf::from("Cargo.toml")
-            } else {
-                parent.join("Cargo.toml")
-            };
-
-            if cargo_toml.exists() {
-                // Read Cargo.toml to get the package name
-                if let Ok(content) = fs::read_to_string(&cargo_toml) {
-                    // Simple parsing: look for [package] section and name field
-                    let mut in_package = false;
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed == "[package]" {
-                            in_package = true;
-                        } else if trimmed.starts_with('[') {
-                            in_package = false;
-                        } else if in_package && trimmed.starts_with("name") {
-                            if let Some(name_part) = trimmed.split('=').nth(1) {
-                                let name = name_part.trim().trim_matches('"').trim_matches('\'');
-                                affected_crates.insert(name.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
+        // Find the crate directory by walking up the path
+        loop {
+            let current_str = current_path.to_string_lossy().to_string();
+            if let Some(crate_name) = dir_to_crate.get(&current_str) {
+                affected_crates.insert(crate_name.clone());
                 break;
             }
 
-            if parent.as_os_str().is_empty() {
+            if !current_path.pop() {
                 break;
             }
-            current = parent;
         }
     }
 
     if affected_crates.is_empty() {
         println!("{}", "No crates affected by changes".yellow());
+        std::process::exit(0);
+    }
+
+    // Filter affected crates to exclude those in the excluded list
+    affected_crates.retain(|crate_name| !excluded_crates.contains(crate_name));
+
+    if affected_crates.is_empty() {
+        println!("{}", "No publishable crates affected by changes".yellow());
         std::process::exit(0);
     }
 
