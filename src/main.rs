@@ -98,7 +98,11 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Optio
     // Helper function to process a README template
     let process_readme_template = |template_path: &Path, output_dir: &Path, crate_name: &str| {
         if !template_path.exists() {
-            error!("🚫 Missing template: {}", template_path.display().red());
+            error!(
+                "🚫 {} Please add a README.md.in template here that describes what this crate is for:\n   {}",
+                "Missing template!".red().bold(),
+                template_path.display().yellow()
+            );
             return;
         }
 
