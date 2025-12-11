@@ -209,9 +209,6 @@ struct FacetDevConfig {
     // Pre-commit jobs
     generate_readmes: bool,
     rustfmt: bool,
-    github_workflows: bool,
-    github_funding: bool,
-    cargo_husky_hooks: bool,
     cargo_lock: bool,
     arborium: bool,
     rust_version: bool,
@@ -246,9 +243,6 @@ fn load_facet_dev_config() -> FacetDevConfig {
         // Pre-commit jobs
         generate_readmes: get_bool("generate-readmes").unwrap_or(true),
         rustfmt: get_bool("rustfmt").unwrap_or(true),
-        github_workflows: get_bool("github-workflows").unwrap_or(true),
-        github_funding: get_bool("github-funding").unwrap_or(true),
-        cargo_husky_hooks: get_bool("cargo-husky-hooks").unwrap_or(true),
         cargo_lock: get_bool("cargo-lock").unwrap_or(true),
         arborium: get_bool("arborium").unwrap_or(true),
         rust_version: get_bool("rust-version").unwrap_or(true),
@@ -268,9 +262,6 @@ impl Default for FacetDevConfig {
             // Pre-commit jobs
             generate_readmes: true,
             rustfmt: true,
-            github_workflows: true,
-            github_funding: true,
-            cargo_husky_hooks: true,
             cargo_lock: true,
             arborium: true,
             rust_version: true,
@@ -620,72 +611,6 @@ fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &Sta
         if let Err(e) = sender.send(job) {
             error!("Failed to send rustfmt job for {}: {}", path.display(), e);
         }
-    }
-}
-
-static GITHUB_TEST_WORKFLOW: &str = include_str!(".github/workflows/test.yml");
-
-fn enqueue_github_workflow_jobs(sender: std::sync::mpsc::Sender<Job>) {
-    use std::fs;
-    let workflow_path = Path::new(".github/workflows/test.yml");
-    let old_content = fs::read(workflow_path).ok();
-
-    // Check if the old content contains the handwritten marker
-    if let Some(content) = &old_content {
-        if let Ok(content_str) = String::from_utf8(content.clone()) {
-            if content_str.contains("# HANDWRITTEN: facet-dev") {
-                return;
-            }
-        }
-    }
-
-    let new_content = GITHUB_TEST_WORKFLOW.as_bytes().to_vec();
-    let job = Job {
-        path: workflow_path.to_path_buf(),
-        old_content,
-        new_content,
-        #[cfg(unix)]
-        executable: false,
-    };
-    if let Err(e) = sender.send(job) {
-        error!("Failed to send GitHub workflow job: {e}");
-    }
-}
-
-static GITHUB_FUNDING_YML: &str = include_str!(".github/FUNDING.yml");
-
-fn enqueue_github_funding_jobs(sender: std::sync::mpsc::Sender<Job>) {
-    use std::fs;
-    let funding_path = Path::new(".github/FUNDING.yml");
-    let old_content = fs::read(funding_path).ok();
-    let new_content = GITHUB_FUNDING_YML.as_bytes().to_vec();
-    let job = Job {
-        path: funding_path.to_path_buf(),
-        old_content,
-        new_content,
-        #[cfg(unix)]
-        executable: false,
-    };
-    if let Err(e) = sender.send(job) {
-        error!("Failed to send GitHub funding job: {e}");
-    }
-}
-
-static CARGO_HUSKY_PRECOMMIT_HOOK: &str = include_str!(".cargo-husky/hooks/pre-commit");
-
-fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>) {
-    let hook_path = Path::new(".cargo-husky/hooks/pre-commit");
-    let old_content = fs::read(hook_path).ok();
-    let new_content = CARGO_HUSKY_PRECOMMIT_HOOK.as_bytes().to_vec();
-    let job = Job {
-        path: hook_path.to_path_buf(),
-        old_content,
-        new_content,
-        #[cfg(unix)]
-        executable: true,
-    };
-    if let Err(e) = sender.send(job) {
-        error!("Failed to send cargo-husky pre-commit hook job: {e}");
     }
 }
 
@@ -1751,33 +1676,6 @@ fn main() {
             let sender = tx_job.clone();
             move || {
                 enqueue_rustfmt_jobs(sender, &staged_files);
-            }
-        }));
-    }
-
-    if config.github_workflows {
-        handles.push(std::thread::spawn({
-            let sender = tx_job.clone();
-            move || {
-                enqueue_github_workflow_jobs(sender);
-            }
-        }));
-    }
-
-    if config.github_funding {
-        handles.push(std::thread::spawn({
-            let sender = tx_job.clone();
-            move || {
-                enqueue_github_funding_jobs(sender);
-            }
-        }));
-    }
-
-    if config.cargo_husky_hooks {
-        handles.push(std::thread::spawn({
-            let sender = tx_job.clone();
-            move || {
-                enqueue_cargo_husky_precommit_hook_jobs(sender);
             }
         }));
     }

@@ -7,9 +7,6 @@ code generation, and CI/CD configuration automatically.
 facet-dev automates the following tasks:
 
 - **README Generation**: Generates `README.md` files from `README.md.in` templates with customizable headers and footers
-- **CI/CD Pipeline Setup**: Creates GitHub Actions workflows for testing, coverage, and quality checks
-- **Funding Configuration**: Sets up GitHub funding information (`FUNDING.yml`)
-- **Pre-commit Hooks**: Installs and manages git hooks via [cargo-husky](https://lib.rs/crates/cargo-husky)
 - **Code Formatting**: Runs `cargo fmt` to enforce consistent code style
 - **Pre-push Verification**: Validates code before pushing (via `facet-dev pre-push`):
   - Runs clippy for linting
@@ -45,11 +42,8 @@ facet-dev
 
 This will:
 1. Generate `README.md` for the workspace and all crates
-2. Set up GitHub Actions workflows
-3. Configure funding information
-4. Install and configure pre-commit hooks
-5. Format code with `cargo fmt`
-6. Stage all changes with `git add`
+2. Format code with `cargo fmt`
+3. Stage all changes with `git add`
 
 ### Pre-push Checks
 
@@ -169,9 +163,6 @@ All options default to `true`. Set to `false` to disable.
 |--------|-------------|
 | `generate-readmes` | Generate `README.md` files from templates |
 | `rustfmt` | Run `cargo fmt` to format code |
-| `github-workflows` | Generate GitHub Actions workflow files |
-| `github-funding` | Generate `FUNDING.yml` |
-| `cargo-husky-hooks` | Install/update cargo-husky pre-commit hooks |
 | `cargo-lock` | Stage `Cargo.lock` changes |
 | `arborium` | Set up arborium syntax highlighting for docs |
 | `rust-version` | Enforce consistent MSRV across crates |
