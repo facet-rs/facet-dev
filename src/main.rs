@@ -382,7 +382,12 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Optio
         }
 
         let dir_name = crate_path.file_name().unwrap().to_string_lossy();
-        if dir_name == "target" {
+
+        // Skip common non-publishable directories
+        if matches!(
+            dir_name.as_ref(),
+            "target" | "xtask" | "examples" | "benches" | "tests" | "fuzz"
+        ) {
             continue;
         }
 
@@ -1209,17 +1214,59 @@ fn run_pre_push() {
 
     let mut config = load_facet_dev_config();
 
-    // HAVE_MERCY=1 skips slow checks (tests, doc tests, docs)
-    if std::env::var("HAVE_MERCY").is_ok() {
+    // HAVE_MERCY levels:
+    // 1 (or just set) = skip slow checks (tests, doc tests, docs)
+    // 2 = also skip clippy (just cargo-shear)
+    // 3 = skip everything, just check formatting basically
+    if let Ok(mercy) = std::env::var("HAVE_MERCY") {
+        let level: u8 = mercy.parse().unwrap_or(1);
+        let mut skipped = Vec::new();
+
+        if level >= 1 {
+            config.nextest = false;
+            config.doc_tests = false;
+            config.docs = false;
+            skipped.extend(["nextest", "doc-tests", "docs"]);
+        }
+        if level >= 2 {
+            config.clippy = false;
+            skipped.push("clippy");
+        }
+        if level >= 3 {
+            config.cargo_shear = false;
+            skipped.push("cargo-shear");
+        }
+
         println!(
             "{}",
-            "🙏 HAVE_MERCY mode: skipping slow checks (tests, doc tests, docs)"
+            format!("🙏 HAVE_MERCY={}: skipping {}", level, skipped.join(", "))
                 .yellow()
                 .bold()
         );
-        config.nextest = false;
-        config.doc_tests = false;
-        config.docs = false;
+    }
+
+    // Show what's disabled via config (if anything)
+    let mut config_disabled = Vec::new();
+    if !config.clippy {
+        config_disabled.push("clippy");
+    }
+    if !config.nextest {
+        config_disabled.push("nextest");
+    }
+    if !config.doc_tests {
+        config_disabled.push("doc-tests");
+    }
+    if !config.docs {
+        config_disabled.push("docs");
+    }
+    if !config.cargo_shear {
+        config_disabled.push("cargo-shear");
+    }
+    if !config_disabled.is_empty() && std::env::var("HAVE_MERCY").is_err() {
+        println!(
+            "{}",
+            format!("⏭️  Disabled via config: {}", config_disabled.join(", ")).dimmed()
+        );
     }
 
     println!("{}", "Running pre-push checks...".cyan().bold());
@@ -1454,6 +1501,7 @@ fn run_pre_push() {
             "🔍".cyan()
         );
         io::stdout().flush().unwrap();
+        let start = std::time::Instant::now();
         let mut clippy_command = vec!["cargo".to_string(), "clippy".to_string()];
         for crate_name in &affected_crates {
             clippy_command.push("-p".to_string());
@@ -1467,13 +1515,20 @@ fn run_pre_push() {
             "warnings".to_string(),
         ]);
         let clippy_output = run_command_with_streaming(&clippy_command, &[]);
+        let elapsed = start.elapsed();
 
         match clippy_output {
             Ok(output) if output.status.success() => {
-                println!("{}", "passed".green());
+                println!(
+                    "{}",
+                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                );
             }
             Ok(output) => {
-                println!("{}", "failed".red());
+                println!(
+                    "{}",
+                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                );
                 let hint_command = clippy_command.clone();
                 exit_with_command_failure(
                     &clippy_command,
@@ -1502,6 +1557,7 @@ fn run_pre_push() {
             "🧪".cyan()
         );
         io::stdout().flush().unwrap();
+        let start = std::time::Instant::now();
         let mut nextest_command = vec![
             "cargo".to_string(),
             "nextest".to_string(),
@@ -1513,13 +1569,20 @@ fn run_pre_push() {
         }
         nextest_command.push("--no-tests=pass".to_string());
         let nextest_output = run_command_with_streaming(&nextest_command, &[]);
+        let elapsed = start.elapsed();
 
         match nextest_output {
             Ok(output) if output.status.success() => {
-                println!("{}", "passed".green());
+                println!(
+                    "{}",
+                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                );
             }
             Ok(output) => {
-                println!("{}", "failed".red());
+                println!(
+                    "{}",
+                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                );
                 exit_with_command_failure(&nextest_command, &[], output, None);
             }
             Err(e) => {
@@ -1536,6 +1599,7 @@ fn run_pre_push() {
             "📚".cyan()
         );
         io::stdout().flush().unwrap();
+        let start = std::time::Instant::now();
         let mut doctest_command =
             vec!["cargo".to_string(), "test".to_string(), "--doc".to_string()];
         for crate_name in &affected_crates {
@@ -1544,16 +1608,23 @@ fn run_pre_push() {
         }
         doctest_command.push("--all-features".to_string());
         let doctest_output = run_command_with_streaming(&doctest_command, &[]);
+        let elapsed = start.elapsed();
 
         match doctest_output {
             Ok(output) if output.status.success() => {
-                println!("{}", "passed".green());
+                println!(
+                    "{}",
+                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                );
             }
             Ok(output) if should_skip_doc_tests(&output) => {
                 println!("{}", "skipped (no lib)".yellow());
             }
             Ok(output) => {
-                println!("{}", "failed".red());
+                println!(
+                    "{}",
+                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                );
                 exit_with_command_failure(&doctest_command, &[], output, None);
             }
             Err(e) => {
@@ -1570,6 +1641,7 @@ fn run_pre_push() {
             "📖".cyan()
         );
         io::stdout().flush().unwrap();
+        let start = std::time::Instant::now();
         let mut doc_command = vec!["cargo".to_string(), "doc".to_string()];
         for crate_name in &affected_crates {
             doc_command.push("-p".to_string());
@@ -1585,13 +1657,20 @@ fn run_pre_push() {
             doc_cmd.env(key, value);
         }
         let doc_output = doc_cmd.output();
+        let elapsed = start.elapsed();
 
         match doc_output {
             Ok(output) if output.status.success() => {
-                println!("{}", "passed".green());
+                println!(
+                    "{}",
+                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                );
             }
             Ok(output) => {
-                println!("{}", "failed".red());
+                println!(
+                    "{}",
+                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                );
                 exit_with_command_failure(&doc_command, &doc_env, output, None);
             }
             Err(e) => {
@@ -1608,6 +1687,7 @@ fn run_pre_push() {
             "🔍".cyan()
         );
         io::stdout().flush().unwrap();
+        let start = std::time::Instant::now();
 
         let shear_command = vec!["cargo".to_string(), "shear".to_string()];
         let mut shear_output = match run_command_with_streaming(&shear_command, &[]) {
@@ -1631,13 +1711,20 @@ fn run_pre_push() {
                 }
             };
         }
+        let elapsed = start.elapsed();
 
         match shear_output {
             output if output.status.success() => {
-                println!("{}", "passed".green());
+                println!(
+                    "{}",
+                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                );
             }
             output => {
-                println!("{}", "failed".red());
+                println!(
+                    "{}",
+                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                );
                 exit_with_command_failure(
                     &shear_command,
                     &[],
