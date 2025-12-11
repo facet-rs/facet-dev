@@ -149,6 +149,21 @@ This installs hooks that:
 - **pre-commit**: Runs `facet-dev` to auto-generate and stage files
 - **pre-push**: Runs `facet-dev pre-push` for comprehensive validation
 
+## Configuration
+
+facet-dev can be configured via `[workspace.metadata.facet-dev]` in your workspace `Cargo.toml`:
+
+```toml
+[workspace.metadata.facet-dev]
+generate-readmes = false  # Disable README generation (default: true)
+```
+
+### Available Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `generate-readmes` | bool | `true` | Generate `README.md` files from templates |
+
 ## Notes
 
 ### Automatic Staging

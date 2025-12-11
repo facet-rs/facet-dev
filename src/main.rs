@@ -203,6 +203,44 @@ fn ensure_rust_version(document: &mut DocumentMut) -> bool {
     true
 }
 
+/// Configuration read from `[workspace.metadata.facet-dev]` in Cargo.toml
+#[derive(Debug)]
+struct FacetDevConfig {
+    generate_readmes: bool,
+}
+
+fn load_facet_dev_config() -> FacetDevConfig {
+    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("Failed to load workspace metadata for config: {e}");
+            return FacetDevConfig::default();
+        }
+    };
+
+    // workspace_metadata is serde_json::Value
+    // We're looking for: [workspace.metadata.facet-dev] generate-readmes = false
+    let facet_dev = match metadata.workspace_metadata.get("facet-dev") {
+        Some(v) => v,
+        None => return FacetDevConfig::default(),
+    };
+
+    let generate_readmes = facet_dev
+        .get("generate-readmes")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true); // default to true if not specified
+
+    FacetDevConfig { generate_readmes }
+}
+
+impl Default for FacetDevConfig {
+    fn default() -> Self {
+        Self {
+            generate_readmes: true, // enabled by default
+        }
+    }
+}
+
 fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Option<&Path>) {
     let workspace_dir = std::env::current_dir().unwrap();
     let entries = match fs_err::read_dir(&workspace_dir) {
@@ -1632,18 +1670,23 @@ fn main() {
         }
     };
 
+    // Load facet-dev config from [workspace.metadata.facet-dev]
+    let config = load_facet_dev_config();
+
     // Use a channel to collect jobs from all tasks.
     let (tx_job, rx_job) = mpsc::channel();
 
     let mut handles = vec![];
 
-    handles.push(std::thread::spawn({
-        let sender = tx_job.clone();
-        let template_dir = template_dir.clone();
-        move || {
-            enqueue_readme_jobs(sender, template_dir.as_deref());
-        }
-    }));
+    if config.generate_readmes {
+        handles.push(std::thread::spawn({
+            let sender = tx_job.clone();
+            let template_dir = template_dir.clone();
+            move || {
+                enqueue_readme_jobs(sender, template_dir.as_deref());
+            }
+        }));
+    }
 
     handles.push(std::thread::spawn({
         let sender = tx_job.clone();
