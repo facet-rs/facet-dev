@@ -391,6 +391,11 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Optio
             continue;
         }
 
+        // Check if this crate has generate-readmes = false in its package metadata
+        if crate_has_readme_disabled(&cargo_toml_path) {
+            continue;
+        }
+
         let crate_name = dir_name.to_string();
 
         // Check for custom template path (from --template-dir or config)
@@ -525,6 +530,24 @@ fn package_name_by_id<'a>(metadata: &'a serde_json::Value, package_id: &str) -> 
         }
     }
     None
+}
+
+/// Check if a crate has `generate-readmes = false` in its `[package.metadata.facet-dev]`
+fn crate_has_readme_disabled(cargo_toml_path: &Path) -> bool {
+    let content = match fs::read_to_string(cargo_toml_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let doc = match content.parse::<toml_edit::DocumentMut>() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    doc.get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("facet-dev"))
+        .and_then(|f| f.get("generate-readmes"))
+        .and_then(|v| v.as_bool())
+        == Some(false)
 }
 
 fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &StagedFiles) {
