@@ -696,18 +696,20 @@ fn run_pre_push() {
         }
     };
 
-    // Get the set of excluded crate names from the workspace
+    // Get the set of workspace member crate IDs
+    let workspace_member_ids: HashSet<_> = metadata
+        .workspace_members
+        .iter()
+        .map(|id| id.repr.clone())
+        .collect();
+
+    // Get the set of excluded crate names (those that are packages but not workspace members)
     let excluded_crates: HashSet<String> = metadata
-        .workspace_metadata
-        .get("exclude")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+        .packages
+        .iter()
+        .filter(|pkg| !workspace_member_ids.contains(&pkg.id.repr))
+        .map(|pkg| pkg.name.to_string())
+        .collect();
 
     // Find the merge base with origin/main
     let merge_base_output = Command::new("git")
@@ -786,7 +788,7 @@ fn run_pre_push() {
         std::collections::HashMap::new();
     for package in &metadata.packages {
         if let Some(parent) = package.manifest_path.parent() {
-            dir_to_crate.insert(parent.to_string(), package.name.clone());
+            dir_to_crate.insert(parent.to_string(), package.name.to_string());
         }
     }
 
