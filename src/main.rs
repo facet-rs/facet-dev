@@ -95,6 +95,21 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Optio
 
     let template_name = "README.md.in";
 
+    // Load custom header and footer from .facet-dev-templates/ if available
+    let custom_templates_dir = workspace_dir.join(".facet-dev-templates");
+    let custom_header = if custom_templates_dir.exists() {
+        let header_path = custom_templates_dir.join("readme-header.md");
+        fs::read_to_string(&header_path).ok()
+    } else {
+        None
+    };
+    let custom_footer = if custom_templates_dir.exists() {
+        let footer_path = custom_templates_dir.join("readme-footer.md");
+        fs::read_to_string(&footer_path).ok()
+    } else {
+        None
+    };
+
     // Helper function to process a README template
     let process_readme_template = |template_path: &Path, output_dir: &Path, crate_name: &str| {
         if !template_path.exists() {
@@ -118,6 +133,8 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Optio
         let readme_content = readme::generate(readme::GenerateReadmeOpts {
             crate_name: crate_name.to_string(),
             input: template_input,
+            header: custom_header.clone(),
+            footer: custom_footer.clone(),
         });
 
         let readme_path = output_dir.join("README.md");
