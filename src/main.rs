@@ -1099,10 +1099,31 @@ fn debug_packages() {
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
         Err(e) => {
+            // Check if this is an empty virtual workspace (no members)
+            let err_str = e.to_string();
+            if err_str.contains("virtual manifest")
+                || err_str.contains("no members")
+                || err_str.contains("workspace has no members")
+            {
+                println!(
+                    "{}",
+                    "No workspace members found (empty virtual workspace)".yellow()
+                );
+                std::process::exit(0);
+            }
             error!("Failed to get workspace metadata: {}", e);
             std::process::exit(1);
         }
     };
+
+    // If this is a virtual workspace with no members, show that info
+    if metadata.workspace_members.is_empty() {
+        println!(
+            "{}",
+            "No workspace members found (empty virtual workspace)".yellow()
+        );
+        std::process::exit(0);
+    }
 
     println!("{}", "\n📦 Workspace Members:".cyan().bold());
     for member_id in &metadata.workspace_members {
@@ -1227,10 +1248,32 @@ fn run_pre_push() {
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
         Ok(m) => m,
         Err(e) => {
+            // Check if this is an empty virtual workspace (no members)
+            let err_str = e.to_string();
+            if err_str.contains("virtual manifest")
+                || err_str.contains("no members")
+                || err_str.contains("workspace has no members")
+            {
+                println!(
+                    "{}",
+                    "No workspace members found, skipping pre-push checks".yellow()
+                );
+                std::process::exit(0);
+            }
             error!("Failed to get workspace metadata: {}", e);
             std::process::exit(1);
         }
     };
+
+    // If this is a virtual workspace with no members, skip checks
+    if metadata.workspace_members.is_empty() {
+        println!(
+            "{}",
+            "No workspace members found, skipping pre-push checks".yellow()
+        );
+        std::process::exit(0);
+    }
+
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
 
     // Get the set of workspace member crate IDs
