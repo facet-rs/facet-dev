@@ -750,6 +750,7 @@ fn run_pre_push() {
             "-p".to_string(),
             crate_name.to_string(),
             "--all-features".to_string(),
+            "--no-tests=pass".to_string(),
         ];
         let mut nextest_cmd = Command::new(&nextest_command[0]);
         for arg in &nextest_command[1..] {
