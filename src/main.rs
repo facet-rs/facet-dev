@@ -466,6 +466,110 @@ fn enqueue_cargo_husky_precommit_hook_jobs(sender: std::sync::mpsc::Sender<Job>)
     }
 }
 
+fn enqueue_arborium_jobs_sync() -> Vec<Job> {
+    use std::collections::HashSet;
+
+    let mut jobs = Vec::new();
+
+    // Load workspace metadata to get all publishable crates
+    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
+        Ok(m) => m,
+        Err(e) => {
+            error!(
+                "Failed to load workspace metadata for arborium setup: {}",
+                e
+            );
+            return jobs;
+        }
+    };
+
+    // Get workspace members
+    let workspace_member_ids: HashSet<_> = metadata
+        .workspace_members
+        .iter()
+        .map(|id| &id.repr)
+        .collect();
+
+    // Filter to get publishable workspace crates (excluding demos and test crates)
+    let arborium_header = br#"<script src="https://arborium.bearcove.eu/arborium.js" data-root-url="https://arborium.bearcove.eu" defer></script>"#;
+
+    for package in &metadata.packages {
+        // Only process workspace members
+        if !workspace_member_ids.contains(&package.id.repr) {
+            continue;
+        }
+
+        // Skip test/example crates based on common patterns
+        if package.name.contains("test") || package.name.contains("example") {
+            continue;
+        }
+
+        if let Some(manifest_dir) = package.manifest_path.parent() {
+            let crate_dir: PathBuf = manifest_dir.into();
+            let header_path = crate_dir.join("arborium-header.html");
+
+            // Check if the file already exists with correct content
+            let old_content = fs::read(&header_path).ok();
+            let new_content = arborium_header.to_vec();
+
+            // Only create a job if the file doesn't exist or content differs
+            if old_content.as_ref() != Some(&new_content) {
+                let job = Job {
+                    path: header_path,
+                    old_content,
+                    new_content,
+                    #[cfg(unix)]
+                    executable: false,
+                };
+                jobs.push(job);
+            }
+
+            // Also update Cargo.toml to add docsrs metadata if not present
+            let cargo_toml_path = crate_dir.join("Cargo.toml");
+            if cargo_toml_path.exists() {
+                if let Ok(content) = fs::read_to_string(&cargo_toml_path) {
+                    if !content.contains("rustdoc-args") {
+                        // Use simple string manipulation to add the docsrs metadata
+                        let mut new_content = content.clone();
+
+                        // If there's no [package.metadata.docs.rs] section, add it
+                        if !new_content.contains("[package.metadata.docs.rs]") {
+                            // Find where to insert it - after [package] section or at the end
+                            let insert_str = "\n[package.metadata.docs.rs]\nrustdoc-args = [\"--html-in-header\", \"arborium-header.html\"]\n";
+
+                            if let Some(package_pos) = new_content.find("[package]") {
+                                // Find the next section after [package] or end of file
+                                if let Some(next_section) =
+                                    new_content[package_pos + 9..].find("\n[")
+                                {
+                                    let insert_pos = package_pos + 9 + next_section;
+                                    new_content.insert_str(insert_pos, insert_str);
+                                } else {
+                                    // No next section, append at end
+                                    new_content.push_str(insert_str);
+                                }
+
+                                if new_content != content {
+                                    let job = Job {
+                                        path: cargo_toml_path.clone().into(),
+                                        old_content: Some(content.into_bytes()),
+                                        new_content: new_content.into_bytes(),
+                                        #[cfg(unix)]
+                                        executable: false,
+                                    };
+                                    jobs.push(job);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    jobs
+}
+
 fn shell_escape(part: &str) -> String {
     if part
         .chars()
@@ -1189,10 +1293,14 @@ fn main() {
 
     drop(tx_job);
 
+    // Arborium setup runs synchronously before job processing to avoid concurrent TOML edits
+    let mut arborium_jobs = enqueue_arborium_jobs_sync();
+
     let mut jobs: Vec<Job> = Vec::new();
     for job in rx_job {
         jobs.push(job);
     }
+    jobs.append(&mut arborium_jobs);
 
     for handle in handles.drain(..) {
         handle.join().unwrap();
