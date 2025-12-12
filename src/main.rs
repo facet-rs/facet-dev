@@ -4,6 +4,7 @@ use owo_colors::{OwoColorize, Style};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 use std::{
+    borrow::Cow,
     ffi::OsStr,
     fs,
     io::{self, BufRead, BufReader, Write},
@@ -11,9 +12,30 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
+use supports_color::{self, Stream as ColorStream};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 mod readme;
+
+fn terminal_supports_color(stream: ColorStream) -> bool {
+    supports_color::on_cached(stream).is_some()
+}
+
+fn maybe_strip_bytes<'a>(data: &'a [u8], stream: ColorStream) -> Cow<'a, [u8]> {
+    if terminal_supports_color(stream) {
+        Cow::Borrowed(data)
+    } else {
+        Cow::Owned(strip_ansi_escapes::strip(data))
+    }
+}
+
+fn maybe_strip_str<'a>(line: &'a str, stream: ColorStream) -> Cow<'a, str> {
+    if terminal_supports_color(stream) {
+        Cow::Borrowed(line)
+    } else {
+        Cow::Owned(strip_ansi_escapes::strip_str(line))
+    }
+}
 
 fn apply_color_env(cmd: &mut Command) {
     cmd.env("FORCE_COLOR", "1");
@@ -766,12 +788,14 @@ fn enqueue_rustfmt_jobs(sender: std::sync::mpsc::Sender<Job>, staged_files: &Sta
         );
 
         if !output.status.success() {
+            let stderr_clean = maybe_strip_bytes(&output.stderr, ColorStream::Stderr);
+            let stdout_clean = maybe_strip_bytes(&output.stdout, ColorStream::Stdout);
             error!(
                 "{} {}: rustfmt failed\n{}\n{}",
                 "❌".red(),
                 path.display().to_string().blue(),
-                String::from_utf8_lossy(&output.stderr).dimmed(),
-                String::from_utf8_lossy(&output.stdout).dimmed()
+                String::from_utf8_lossy(&stderr_clean).dimmed(),
+                String::from_utf8_lossy(&stdout_clean).dimmed()
             );
             continue;
         }
@@ -1051,15 +1075,13 @@ fn install_cargo_shear() {
     exit_with_command_failure(&binstall_command, &[], binstall_output, None);
 }
 
-fn print_stream(label: &str, data: &[u8]) {
+fn print_stream(label: &str, data: &[u8], stream: ColorStream) {
     if data.is_empty() {
         println!("    {}: <empty>", label);
     } else {
-        println!(
-            "    {}:\n{}",
-            label,
-            String::from_utf8_lossy(data).trim_end()
-        );
+        let cleaned = maybe_strip_bytes(data, stream);
+        let text = String::from_utf8_lossy(&cleaned);
+        println!("    {}:\n{}", label, text.trim_end());
     }
 }
 
@@ -1083,8 +1105,8 @@ fn exit_with_command_failure(
         Some(code) => println!("    exit code: {}", code),
         None => println!("    exit code: terminated by signal"),
     }
-    print_stream("stdout", &output.stdout);
-    print_stream("stderr", &output.stderr);
+    print_stream("stdout", &output.stdout, ColorStream::Stdout);
+    print_stream("stderr", &output.stderr, ColorStream::Stderr);
     if let Some(action) = hint {
         action();
     }
@@ -1179,13 +1201,13 @@ fn run_command_with_streaming(
                 // Process has finished, collect remaining output
                 while let Ok(line) = stdout_rx.try_recv() {
                     if streaming {
-                        println!("{}", line);
+                        println!("{}", maybe_strip_str(&line, ColorStream::Stdout));
                     }
                     stdout_buffer.push(line);
                 }
                 while let Ok(line) = stderr_rx.try_recv() {
                     if streaming {
-                        eprintln!("{}", line);
+                        eprintln!("{}", maybe_strip_str(&line, ColorStream::Stderr));
                     }
                     stderr_buffer.push(line);
                 }
@@ -1223,10 +1245,10 @@ fn run_command_with_streaming(
                     );
                     // Flush buffered output
                     for line in &stdout_buffer {
-                        println!("{}", line);
+                        println!("{}", maybe_strip_str(line, ColorStream::Stdout));
                     }
                     for line in &stderr_buffer {
-                        eprintln!("{}", line);
+                        eprintln!("{}", maybe_strip_str(line, ColorStream::Stderr));
                     }
                 }
 
@@ -1234,14 +1256,14 @@ fn run_command_with_streaming(
                 let mut got_output = false;
                 while let Ok(line) = stdout_rx.try_recv() {
                     if streaming {
-                        println!("{}", line);
+                        println!("{}", maybe_strip_str(&line, ColorStream::Stdout));
                     }
                     stdout_buffer.push(line);
                     got_output = true;
                 }
                 while let Ok(line) = stderr_rx.try_recv() {
                     if streaming {
-                        eprintln!("{}", line);
+                        eprintln!("{}", maybe_strip_str(&line, ColorStream::Stderr));
                     }
                     stderr_buffer.push(line);
                     got_output = true;
