@@ -214,6 +214,129 @@ fn ensure_rust_version(document: &mut DocumentMut) -> bool {
     true
 }
 
+/// Check that all workspace crates use edition 2024. Bails with an error if not.
+fn check_edition_2024() {
+    use std::collections::HashSet;
+
+    let metadata = match cargo_metadata::MetadataCommand::new().exec() {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("Failed to load workspace metadata for edition check: {}", e);
+            return;
+        }
+    };
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // Check workspace.package.edition in root Cargo.toml (if it exists)
+    let workspace_root = &metadata.workspace_root;
+    let root_cargo_toml = workspace_root.join("Cargo.toml");
+    if root_cargo_toml.as_std_path().exists() {
+        if let Ok(content) = fs::read_to_string(root_cargo_toml.as_std_path()) {
+            if let Ok(doc) = content.parse::<DocumentMut>() {
+                if let Some(workspace) = doc.get("workspace").and_then(Item::as_table) {
+                    if let Some(package) = workspace.get("package").and_then(Item::as_table) {
+                        if let Some(edition) = package.get("edition").and_then(Item::as_str) {
+                            if edition != "2024" {
+                                errors.push(format!(
+                                    "{}: [workspace.package].edition = {:?} (expected \"2024\")",
+                                    root_cargo_toml, edition
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Get workspace members
+    let workspace_member_ids: HashSet<_> = metadata
+        .workspace_members
+        .iter()
+        .map(|id| &id.repr)
+        .collect();
+
+    // Check each workspace crate's edition
+    for package in &metadata.packages {
+        if !workspace_member_ids.contains(&package.id.repr) {
+            continue;
+        }
+
+        let edition = &package.edition;
+        if edition.as_str() != "2024" {
+            errors.push(format!(
+                "{}: edition = \"{}\" (expected \"2024\")",
+                package.manifest_path,
+                edition.as_str()
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        error!(
+            "{}",
+            "You have been deemed OUTDATED - edition 2024 now or bust".red()
+        );
+        error!("");
+        for err in &errors {
+            error!("  {} {}", "fix:".yellow(), err);
+        }
+        error!("");
+        error!("Set edition = \"2024\" in the above location(s) to proceed.");
+        std::process::exit(1);
+    }
+}
+
+/// Get the git tree hash for a directory
+fn get_git_tree_hash(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", &format!("HEAD:{}", path.display())])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Cache file location: .git/facet-dev-cache.json
+fn get_cache_path() -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Some(PathBuf::from(git_dir).join("facet-dev-cache.json"))
+    } else {
+        None
+    }
+}
+
+/// Load the check cache (crate_name -> tree_hash that passed)
+fn load_check_cache() -> std::collections::HashMap<String, String> {
+    let Some(cache_path) = get_cache_path() else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(content) = fs::read_to_string(&cache_path) else {
+        return std::collections::HashMap::new();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+/// Save the check cache
+#[allow(dead_code)]
+fn save_check_cache(cache: &std::collections::HashMap<String, String>) {
+    let Some(cache_path) = get_cache_path() else {
+        return;
+    };
+    if let Ok(content) = serde_json::to_string_pretty(cache) {
+        let _ = fs::write(&cache_path, content);
+    }
+}
+
 /// Configuration read from `[workspace.metadata.facet-dev]` in Cargo.toml
 #[derive(Debug)]
 struct FacetDevConfig {
@@ -223,6 +346,7 @@ struct FacetDevConfig {
     cargo_lock: bool,
     arborium: bool,
     rust_version: bool,
+    edition_2024: bool,
 
     // Pre-push checks
     clippy: bool,
@@ -262,6 +386,7 @@ fn load_facet_dev_config() -> FacetDevConfig {
         cargo_lock: get_bool("cargo-lock").unwrap_or(true),
         arborium: get_bool("arborium").unwrap_or(true),
         rust_version: get_bool("rust-version").unwrap_or(true),
+        edition_2024: get_bool("edition-2024").unwrap_or(true),
 
         // Pre-push checks
         clippy: get_bool("clippy").unwrap_or(true),
@@ -281,6 +406,7 @@ impl Default for FacetDevConfig {
             cargo_lock: true,
             arborium: true,
             rust_version: true,
+            edition_2024: true,
 
             // Pre-push checks
             clippy: true,
@@ -1478,6 +1604,47 @@ fn run_pre_push() {
         std::process::exit(0);
     }
 
+    // Build crate_name -> relative_path map for cache lookups
+    let crate_to_path: std::collections::HashMap<String, PathBuf> = metadata
+        .packages
+        .iter()
+        .filter_map(|pkg| {
+            pkg.manifest_path.parent().map(|p| {
+                let path = p.as_std_path();
+                let rel = path.strip_prefix(&workspace_root).unwrap_or(path);
+                (pkg.name.to_string(), rel.to_path_buf())
+            })
+        })
+        .collect();
+
+    // Load cache and filter out crates that haven't changed since last successful check
+    let cache = load_check_cache();
+    let mut cached_crates = Vec::new();
+    affected_crates.retain(|crate_name| {
+        if let Some(rel_path) = crate_to_path.get(crate_name) {
+            if let Some(current_hash) = get_git_tree_hash(rel_path) {
+                if cache.get(crate_name) == Some(&current_hash) {
+                    cached_crates.push(crate_name.clone());
+                    return false;
+                }
+            }
+        }
+        true
+    });
+
+    if !cached_crates.is_empty() {
+        println!(
+            "{} Skipping {} (unchanged since last check)",
+            "⏭️".dimmed(),
+            cached_crates.join(", ").dimmed()
+        );
+    }
+
+    if affected_crates.is_empty() {
+        println!("{}", "All affected crates cached, nothing to check".green());
+        std::process::exit(0);
+    }
+
     // Sort for consistent output
     let affected_crates: BTreeSet<_> = affected_crates.into_iter().collect();
 
@@ -1856,6 +2023,11 @@ fn main() {
 
     // Load facet-dev config from [workspace.metadata.facet-dev]
     let config = load_facet_dev_config();
+
+    // Check edition 2024 requirement (bails if not met)
+    if config.edition_2024 {
+        check_edition_2024();
+    }
 
     // Use a channel to collect jobs from all tasks.
     let (tx_job, rx_job) = mpsc::channel();

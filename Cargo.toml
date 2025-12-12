@@ -1,7 +1,7 @@
 [package]
 name = "facet-dev"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 description = "Internal development utilities for Facet"
 keywords = ["code-generation", "templates"]
 categories = ["development-tools"]
