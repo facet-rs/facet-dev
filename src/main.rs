@@ -440,7 +440,11 @@ impl Default for FacetDevConfig {
     }
 }
 
-fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Option<&Path>) {
+fn enqueue_readme_jobs(
+    sender: std::sync::mpsc::Sender<Job>,
+    template_dir: Option<&Path>,
+    staged_files: &StagedFiles,
+) {
     let workspace_dir = std::env::current_dir().unwrap();
     let entries = match fs_err::read_dir(&workspace_dir) {
         Ok(e) => e,
@@ -495,6 +499,55 @@ fn enqueue_readme_jobs(sender: std::sync::mpsc::Sender<Job>, template_dir: Optio
         });
 
         let readme_path = output_dir.join("README.md");
+
+        // Check if this README is staged and would be modified
+        if staged_files.clean.contains(&readme_path) {
+            // Get the staged content
+            let staged_content = command_with_color("git")
+                .args(["show", &format!(":{}", readme_path.display())])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| o.stdout);
+
+            if let Some(staged) = staged_content {
+                let new_content_bytes = readme_content.as_bytes();
+                if staged != new_content_bytes {
+                    // The staged version differs from what we would generate!
+                    error!("");
+                    error!("{}", "❌ GENERATED FILE CONFLICT DETECTED".red().bold());
+                    error!("");
+                    error!(
+                        "You modified {} directly, but this file is auto-generated.",
+                        readme_path.display().yellow()
+                    );
+                    error!("This pre-commit hook would overwrite your changes.");
+                    error!("");
+                    error!(
+                        "{} Edit {} instead (the template source)",
+                        "→".cyan(),
+                        template_path.display().yellow()
+                    );
+                    error!("");
+                    error!("{}", "To fix this:".cyan().bold());
+                    error!("  1. Undo changes to the generated file:");
+                    error!("     git restore --staged {}", readme_path.display());
+                    error!("     git restore {}", readme_path.display());
+                    error!("");
+                    error!("  2. OR edit the template and regenerate:");
+                    error!("     # Edit {}", template_path.display());
+                    error!("     cargo run --release  # regenerate");
+                    error!(
+                        "     git add {}  # stage the generated file",
+                        readme_path.display()
+                    );
+                    error!("");
+                    error!("Refusing to commit until this conflict is resolved.");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         let old_content = fs::read(&readme_path).ok();
 
         let job = Job {
@@ -2060,8 +2113,9 @@ fn main() {
         handles.push(std::thread::spawn({
             let sender = tx_job.clone();
             let template_dir = template_dir.clone();
+            let staged_files_clone = staged_files.clone();
             move || {
-                enqueue_readme_jobs(sender, template_dir.as_deref());
+                enqueue_readme_jobs(sender, template_dir.as_deref(), &staged_files_clone);
             }
         }));
     }
@@ -2114,7 +2168,7 @@ fn main() {
     show_and_apply_jobs(&mut jobs);
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StagedFiles {
     /// Files that are staged (in the index) and not dirty (working tree matches index).
     clean: Vec<PathBuf>,
