@@ -502,9 +502,14 @@ fn enqueue_readme_jobs(
 
         // Check if this README is staged and would be modified
         if staged_files.clean.contains(&readme_path) {
+            // Get the relative path for git commands (git show doesn't like absolute paths)
+            let relative_path = readme_path
+                .strip_prefix(&workspace_dir)
+                .unwrap_or(&readme_path);
+
             // Get the staged content
             let staged_content = command_with_color("git")
-                .args(["show", &format!(":{}", readme_path.display())])
+                .args(["show", &format!(":{}", relative_path.display())])
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
@@ -2241,6 +2246,7 @@ fn collect_staged_files() -> io::Result<StagedFiles> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut clean = Vec::new();
+    let cwd = std::env::current_dir()?;
 
     for line in stdout.lines() {
         // E.g. "M  src/main.rs", "A  foo.rs", "AM foo/bar.rs"
@@ -2261,12 +2267,14 @@ fn collect_staged_files() -> io::Result<StagedFiles> {
 
         // Staged and not dirty (to be formatted/committed)
         if x != ' ' && x != '?' && y == ' ' {
+            // Convert relative path to absolute for consistent comparison
+            let abs_path = cwd.join(&path);
             log::debug!(
                 "{} {}",
                 "-> clean (staged, not dirty):".green().bold(),
-                path.as_str().blue()
+                abs_path.display().to_string().blue()
             );
-            clean.push(PathBuf::from(&path));
+            clean.push(abs_path);
         }
     }
     Ok(StagedFiles { clean })
