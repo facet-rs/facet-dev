@@ -372,9 +372,17 @@ struct FacetDevConfig {
 
     // Pre-push checks
     clippy: bool,
+    /// Features to use for clippy. If None, uses --all-features.
+    /// If Some(vec), uses --features with the specified features.
+    /// Use Some(vec![]) to run with no extra features.
+    clippy_features: Option<Vec<String>>,
     nextest: bool,
     doc_tests: bool,
+    /// Features to use for doc tests. If None, uses --all-features.
+    doc_test_features: Option<Vec<String>>,
     docs: bool,
+    /// Features to use for docs. If None, uses --all-features.
+    docs_features: Option<Vec<String>>,
     cargo_shear: bool,
 }
 
@@ -401,6 +409,28 @@ fn load_facet_dev_config() -> FacetDevConfig {
 
     let get_bool = |key: &str| -> Option<bool> { facet_dev.get(key).and_then(|v| v.as_bool()) };
 
+    // Helper to parse feature config: array of strings, or false for no features
+    let parse_features = |key: &str| -> Option<Vec<String>> {
+        facet_dev.get(key).and_then(|v| {
+            if let Some(arr) = v.as_array() {
+                Some(
+                    arr.iter()
+                        .filter_map(|item| item.as_str().map(String::from))
+                        .collect(),
+                )
+            } else if v.as_bool() == Some(false) {
+                // features = false means use no extra features (empty vec)
+                Some(vec![])
+            } else {
+                None
+            }
+        })
+    };
+
+    let clippy_features = parse_features("clippy-features");
+    let doc_test_features = parse_features("doc-test-features");
+    let docs_features = parse_features("docs-features");
+
     FacetDevConfig {
         // Pre-commit jobs
         generate_readmes: get_bool("generate-readmes").unwrap_or(true),
@@ -412,9 +442,12 @@ fn load_facet_dev_config() -> FacetDevConfig {
 
         // Pre-push checks
         clippy: get_bool("clippy").unwrap_or(true),
+        clippy_features,
         nextest: get_bool("nextest").unwrap_or(true),
         doc_tests: get_bool("doc-tests").unwrap_or(true),
+        doc_test_features,
         docs: get_bool("docs").unwrap_or(true),
+        docs_features,
         cargo_shear: get_bool("cargo-shear").unwrap_or(true),
     }
 }
@@ -432,9 +465,12 @@ impl Default for FacetDevConfig {
 
             // Pre-push checks
             clippy: true,
+            clippy_features: None, // None means use --all-features
             nextest: true,
             doc_tests: true,
+            doc_test_features: None,
             docs: true,
+            docs_features: None,
             cargo_shear: true,
         }
     }
@@ -1754,9 +1790,21 @@ fn run_pre_push() {
             clippy_command.push("-p".to_string());
             clippy_command.push(crate_name.to_string());
         }
+        clippy_command.push("--all-targets".to_string());
+        // Use configured features, or --all-features if not specified
+        match &config.clippy_features {
+            None => {
+                clippy_command.push("--all-features".to_string());
+            }
+            Some(features) if !features.is_empty() => {
+                clippy_command.push("--features".to_string());
+                clippy_command.push(features.join(","));
+            }
+            Some(_) => {
+                // Empty features list means no extra features
+            }
+        }
         clippy_command.extend(vec![
-            "--all-targets".to_string(),
-            "--all-features".to_string(),
             "--".to_string(),
             "-D".to_string(),
             "warnings".to_string(),
@@ -1853,7 +1901,19 @@ fn run_pre_push() {
             doctest_command.push("-p".to_string());
             doctest_command.push(crate_name.to_string());
         }
-        doctest_command.push("--all-features".to_string());
+        // Use configured features, or --all-features if not specified
+        match &config.doc_test_features {
+            None => {
+                doctest_command.push("--all-features".to_string());
+            }
+            Some(features) if !features.is_empty() => {
+                doctest_command.push("--features".to_string());
+                doctest_command.push(features.join(","));
+            }
+            Some(_) => {
+                // Empty features list means no extra features
+            }
+        }
         let doctest_output = run_command_with_streaming(&doctest_command, &[]);
         let elapsed = start.elapsed();
 
@@ -1894,7 +1954,19 @@ fn run_pre_push() {
             doc_command.push("-p".to_string());
             doc_command.push(crate_name.to_string());
         }
-        doc_command.push("--all-features".to_string());
+        // Use configured features, or --all-features if not specified
+        match &config.docs_features {
+            None => {
+                doc_command.push("--all-features".to_string());
+            }
+            Some(features) if !features.is_empty() => {
+                doc_command.push("--features".to_string());
+                doc_command.push(features.join(","));
+            }
+            Some(_) => {
+                // Empty features list means no extra features
+            }
+        }
         let doc_env = [("RUSTDOCFLAGS", "-D warnings")];
         let mut doc_cmd = command_with_color(&doc_command[0]);
         for arg in &doc_command[1..] {
