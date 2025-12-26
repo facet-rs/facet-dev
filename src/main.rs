@@ -492,20 +492,26 @@ fn enqueue_readme_jobs(
 
     let template_name = "README.md.in";
 
-    // Load custom header and footer from .facet-dev-templates/ if available
-    let custom_templates_dir = workspace_dir.join(".facet-dev-templates");
-    let custom_header = if custom_templates_dir.exists() {
-        let header_path = custom_templates_dir.join("readme-header.md");
-        fs::read_to_string(&header_path).ok()
-    } else {
+    // Load custom header and footer from template directories if available
+    // Check .facet-dev-templates/ first, then fall back to .config/facet-dev/readme-templates/
+    let template_dirs = [
+        workspace_dir.join(".facet-dev-templates"),
+        workspace_dir.join(".config/facet-dev/readme-templates"),
+    ];
+
+    let find_template = |filename: &str| -> Option<String> {
+        for dir in &template_dirs {
+            if dir.exists() {
+                if let Ok(content) = fs::read_to_string(dir.join(filename)) {
+                    return Some(content);
+                }
+            }
+        }
         None
     };
-    let custom_footer = if custom_templates_dir.exists() {
-        let footer_path = custom_templates_dir.join("readme-footer.md");
-        fs::read_to_string(&footer_path).ok()
-    } else {
-        None
-    };
+
+    let custom_header = find_template("readme-header.md");
+    let custom_footer = find_template("readme-footer.md");
 
     // Helper function to process a README template
     let process_readme_template = |template_path: &Path, output_dir: &Path, crate_name: &str| {
