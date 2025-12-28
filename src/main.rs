@@ -1141,40 +1141,6 @@ fn print_shear_fix_hint() {
     );
 }
 
-fn install_cargo_shear() {
-    println!(
-        "    {} Installing cargo-shear via cargo-binstall...",
-        "⬇️".cyan()
-    );
-    let binstall_command = vec![
-        "cargo".to_string(),
-        "binstall".to_string(),
-        "-y".to_string(),
-        "cargo-shear".to_string(),
-    ];
-    let binstall_output = match run_command_with_streaming(&binstall_command, &[]) {
-        Ok(output) => output,
-        Err(e) => {
-            println!("{}", "    cargo-binstall invocation failed".red());
-            exit_with_command_error(&binstall_command, &[], e, None);
-        }
-    };
-
-    if binstall_output.status.success() {
-        println!("{}", "    cargo-shear installed".green());
-        return;
-    }
-
-    println!("{}", "    cargo-binstall failed".red());
-    if indicates_missing_cargo_subcommand(&binstall_output, "binstall") {
-        println!(
-            "    {} Install cargo-binstall first: https://github.com/cargo-bins/cargo-binstall#installation",
-            "⚠️".yellow()
-        );
-    }
-    exit_with_command_failure(&binstall_command, &[], binstall_output, None);
-}
-
 fn print_stream(label: &str, data: &[u8], stream: ColorStream) {
     if data.is_empty() {
         println!("    {}: <empty>", label);
@@ -1580,77 +1546,13 @@ fn run_pre_push() {
         unsafe { std::env::set_var("CARGO_TARGET_DIR", target_dir) };
     }
 
-    // Fetch to ensure origin/main is up to date
-    println!("  {} Fetching latest from origin...", "⬇️".cyan());
-    let fetch_output = command_with_color("git")
-        .args(["fetch", "origin", "main"])
-        .output();
-
-    match fetch_output {
-        Ok(output) if !output.status.success() => {
-            error!(
-                "Failed to fetch from origin: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            std::process::exit(1);
-        }
-        Err(e) => {
-            error!("Failed to run git fetch: {}", e);
-            std::process::exit(1);
-        }
-        _ => {}
-    }
-
-    // Check if current branch is fast-forward to origin/main
-    let merge_base_output = command_with_color("git")
-        .args(["merge-base", "HEAD", "origin/main"])
-        .output();
-
-    let merge_base = match merge_base_output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => {
-            error!("Failed to find merge base with origin/main");
-            std::process::exit(1);
-        }
-    };
-
-    // Get current HEAD
-    let head_output = command_with_color("git")
-        .args(["rev-parse", "HEAD"])
-        .output();
-
-    let head = match head_output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => {
-            error!("Failed to get HEAD");
-            std::process::exit(1);
-        }
-    };
-
-    // If merge-base != origin/main, we have non-fast-forward changes
-    if merge_base != head {
-        // Check if origin/main is ahead of merge_base
-        let origin_main = "origin/main";
-        let ahead_check = command_with_color("git")
-            .args(["rev-parse", origin_main])
-            .output();
-
-        if let Ok(output) = ahead_check {
-            if output.status.success() {
-                let origin_main_rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if origin_main_rev != merge_base {
-                    error!("Your branch has diverged from origin/main");
-                    error!("Please rebase your changes:");
-                    error!("  git rebase origin/main");
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
+    // Spawn git fetch in background - we'll check the result later
+    println!("  {} Fetching origin/main in background...", "⬇️".cyan());
+    let fetch_handle = std::thread::spawn(|| {
+        Command::new("git")
+            .args(["fetch", "origin", "main"])
+            .output()
+    });
 
     // Load workspace metadata
     let metadata = match cargo_metadata::MetadataCommand::new().exec() {
@@ -1706,6 +1608,77 @@ fn run_pre_push() {
         .filter(|pkg| !workspace_member_ids.contains(&pkg.id.repr))
         .map(|pkg| pkg.name.to_string())
         .collect();
+
+    // Wait for git fetch to complete before we use origin/main
+    match fetch_handle.join() {
+        Ok(Ok(output)) if !output.status.success() => {
+            error!(
+                "Failed to fetch from origin: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::process::exit(1);
+        }
+        Ok(Err(e)) => {
+            error!("Failed to run git fetch: {}", e);
+            std::process::exit(1);
+        }
+        Err(_) => {
+            error!("git fetch thread panicked");
+            std::process::exit(1);
+        }
+        Ok(Ok(_)) => {} // Success
+    }
+
+    // Check if current branch is fast-forward to origin/main
+    let merge_base_output = command_with_color("git")
+        .args(["merge-base", "HEAD", "origin/main"])
+        .output();
+
+    let merge_base = match merge_base_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            error!("Failed to find merge base with origin/main");
+            std::process::exit(1);
+        }
+    };
+
+    // Get current HEAD
+    let head_output = command_with_color("git")
+        .args(["rev-parse", "HEAD"])
+        .output();
+
+    let head = match head_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            error!("Failed to get HEAD");
+            std::process::exit(1);
+        }
+    };
+
+    // If merge-base != origin/main, we have non-fast-forward changes
+    if merge_base != head {
+        // Check if origin/main is ahead of merge_base
+        let origin_main = "origin/main";
+        let ahead_check = command_with_color("git")
+            .args(["rev-parse", origin_main])
+            .output();
+
+        if let Ok(output) = ahead_check {
+            if output.status.success() {
+                let origin_main_rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if origin_main_rev != merge_base {
+                    error!("Your branch has diverged from origin/main");
+                    error!("Please rebase your changes:");
+                    error!("  git rebase origin/main");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 
     // Get the list of changed files between origin/main and HEAD
     let mut changed_files: std::collections::BTreeSet<String> = BTreeSet::new();
@@ -1844,87 +1817,14 @@ fn run_pre_push() {
 
     println!();
 
-    // Build nextest tests first (needs cargo lock for compilation)
-    // Then we spawn the test runner in the background while other checks run
-    type TestResult = (
+    // Type alias for background task results
+    type CommandResult = (
         Vec<String>,
         Result<std::process::Output, std::io::Error>,
         Duration,
     );
-    let test_handle: Option<std::thread::JoinHandle<TestResult>> = if config.nextest {
-        print!(
-            "  {} Building tests for all affected crates... ",
-            "🔨".cyan()
-        );
-        io::stdout().flush().unwrap();
-        let start = std::time::Instant::now();
-        let mut build_command = vec![
-            "cargo".to_string(),
-            "nextest".to_string(),
-            "run".to_string(),
-            "--no-run".to_string(),
-        ];
-        for crate_name in &affected_crates {
-            build_command.push("-p".to_string());
-            build_command.push(crate_name.to_string());
-        }
-        let build_output = run_command_with_streaming(&build_command, &[]);
-        let elapsed = start.elapsed();
 
-        match build_output {
-            Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
-            }
-            Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
-                exit_with_command_failure(&build_command, &[], output, None);
-            }
-            Err(e) => {
-                println!("{}", "failed".red());
-                exit_with_command_error(&build_command, &[], e, None);
-            }
-        }
-
-        // Spawn test runner in background
-        println!(
-            "  {} Running tests in background while other checks run...",
-            "🧪".cyan()
-        );
-        let mut run_command = vec![
-            "cargo".to_string(),
-            "nextest".to_string(),
-            "run".to_string(),
-        ];
-        for crate_name in &affected_crates {
-            run_command.push("-p".to_string());
-            run_command.push(crate_name.to_string());
-        }
-        run_command.push("--no-tests=pass".to_string());
-
-        let handle = std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            let mut cmd = command_with_color(&run_command[0]);
-            for arg in &run_command[1..] {
-                cmd.arg(arg);
-            }
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-            let output = cmd.output();
-            let elapsed = start.elapsed();
-            (run_command, output, elapsed)
-        });
-        Some(handle)
-    } else {
-        None
-    };
-
-    // Run clippy (can run while tests are running - no cargo lock needed for already-compiled code)
+    // 1. Run clippy FIRST - catches most issues quickly
     if config.clippy {
         print!(
             "  {} Running clippy for all affected crates... ",
@@ -1992,7 +1892,99 @@ fn run_pre_push() {
         }
     }
 
-    // Run doc tests (can run in parallel with nextest since they test different things)
+    // 2. Build nextest tests
+    let test_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.nextest {
+        print!(
+            "  {} Building tests for all affected crates... ",
+            "🔨".cyan()
+        );
+        io::stdout().flush().unwrap();
+        let start = std::time::Instant::now();
+        let mut build_command = vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+            "--no-run".to_string(),
+        ];
+        for crate_name in &affected_crates {
+            build_command.push("-p".to_string());
+            build_command.push(crate_name.to_string());
+        }
+        let build_output = run_command_with_streaming(&build_command, &[]);
+        let elapsed = start.elapsed();
+
+        match build_output {
+            Ok(output) if output.status.success() => {
+                println!(
+                    "{}",
+                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                );
+            }
+            Ok(output) => {
+                println!(
+                    "{}",
+                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                );
+                exit_with_command_failure(&build_command, &[], output, None);
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                exit_with_command_error(&build_command, &[], e, None);
+            }
+        }
+
+        // 3. Spawn test runner in background
+        println!("  {} Running tests in background...", "🧪".cyan());
+        let mut run_command = vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+        ];
+        for crate_name in &affected_crates {
+            run_command.push("-p".to_string());
+            run_command.push(crate_name.to_string());
+        }
+        run_command.push("--no-tests=pass".to_string());
+
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut cmd = command_with_color(&run_command[0]);
+            for arg in &run_command[1..] {
+                cmd.arg(arg);
+            }
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            let output = cmd.output();
+            let elapsed = start.elapsed();
+            (run_command, output, elapsed)
+        });
+        Some(handle)
+    } else {
+        None
+    };
+
+    // 3. Spawn cargo-shear in background (doesn't need cargo lock)
+    let shear_handle: Option<std::thread::JoinHandle<CommandResult>> = if config.cargo_shear {
+        println!("  {} Running cargo-shear in background...", "✂️".cyan());
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let shear_command = vec!["cargo".to_string(), "shear".to_string()];
+            let mut cmd = command_with_color(&shear_command[0]);
+            for arg in &shear_command[1..] {
+                cmd.arg(arg);
+            }
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            let output = cmd.output();
+            let elapsed = start.elapsed();
+            (shear_command, output, elapsed)
+        });
+        Some(handle)
+    } else {
+        None
+    };
+
+    // 4. Run doc tests (while tests run in background)
     if config.doc_tests {
         print!(
             "  {} Running doc tests for all affected crates... ",
@@ -2046,7 +2038,7 @@ fn run_pre_push() {
         }
     }
 
-    // Build docs
+    // 5. Build docs (while tests run in background)
     if config.docs {
         print!(
             "  {} Building docs for all affected crates... ",
@@ -2108,62 +2100,51 @@ fn run_pre_push() {
         }
     }
 
-    // Run cargo-shear
-    if config.cargo_shear {
-        print!(
-            "  {} Running cargo-shear to check for unused dependencies... ",
-            "🔍".cyan()
-        );
+    // 6. Wait for cargo-shear background task
+    if let Some(handle) = shear_handle {
+        print!("  {} Waiting for cargo-shear... ", "✂️".cyan());
         io::stdout().flush().unwrap();
-        let start = std::time::Instant::now();
 
-        let shear_command = vec!["cargo".to_string(), "shear".to_string()];
-        let mut shear_output = match run_command_with_streaming(&shear_command, &[]) {
-            Ok(output) => output,
-            Err(e) => {
-                println!("{}", "failed".red());
-                exit_with_command_error(&shear_command, &[], e, None);
-            }
-        };
-
-        if !shear_output.status.success()
-            && indicates_missing_cargo_subcommand(&shear_output, "shear")
-        {
-            println!("    {} cargo-shear not found; installing...", "ℹ️".cyan());
-            install_cargo_shear();
-            shear_output = match run_command_with_streaming(&shear_command, &[]) {
-                Ok(output) => output,
+        match handle.join() {
+            Ok((shear_command, output_result, elapsed)) => match output_result {
+                Ok(output) if output.status.success() => {
+                    println!(
+                        "{}",
+                        format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                    );
+                }
+                Ok(output) if indicates_missing_cargo_subcommand(&output, "shear") => {
+                    println!("{}", "skipped (not installed)".yellow());
+                    println!(
+                        "    {} Install with: cargo binstall cargo-shear",
+                        "💡".cyan()
+                    );
+                }
+                Ok(output) => {
+                    println!(
+                        "{}",
+                        format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                    );
+                    exit_with_command_failure(
+                        &shear_command,
+                        &[],
+                        output,
+                        Some(Box::new(print_shear_fix_hint)),
+                    );
+                }
                 Err(e) => {
                     println!("{}", "failed".red());
                     exit_with_command_error(&shear_command, &[], e, None);
                 }
-            };
-        }
-        let elapsed = start.elapsed();
-
-        match shear_output {
-            output if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
-            }
-            output => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
-                exit_with_command_failure(
-                    &shear_command,
-                    &[],
-                    output,
-                    Some(Box::new(print_shear_fix_hint)),
-                );
+            },
+            Err(_) => {
+                println!("{}", "failed (thread panicked)".red());
+                std::process::exit(1);
             }
         }
     }
 
-    // Wait for background test results
+    // 7. Wait for background test results
     if let Some(handle) = test_handle {
         print!("  {} Waiting for test results... ", "🧪".cyan());
         io::stdout().flush().unwrap();
