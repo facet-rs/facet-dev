@@ -1457,6 +1457,48 @@ fn debug_packages() {
     println!("\n✅ Total packages: {}", metadata.packages.len());
 }
 
+/// Get the shared target directory for pre-push checks (~/.facet-dev/target)
+fn get_shared_target_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".facet-dev").join("target"))
+}
+
+/// Calculate directory size recursively (returns bytes)
+fn dir_size(path: &Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+
+    let mut size = 0u64;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                size += dir_size(&path);
+            } else if let Ok(meta) = entry.metadata() {
+                size += meta.len();
+            }
+        }
+    }
+    size
+}
+
+/// Format bytes as human-readable size
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 fn run_pre_push() {
     use std::collections::{BTreeSet, HashSet};
 
@@ -1518,6 +1560,25 @@ fn run_pre_push() {
     }
 
     println!("{}", "Running pre-push checks...".cyan().bold());
+
+    // Set up shared target directory
+    let shared_target_dir = get_shared_target_dir();
+    if let Some(ref target_dir) = shared_target_dir {
+        // Create the directory if it doesn't exist
+        let _ = fs::create_dir_all(target_dir);
+
+        let size = dir_size(target_dir);
+        println!(
+            "  {} Using shared target dir: {} ({})",
+            "📦".cyan(),
+            target_dir.display().to_string().blue(),
+            format_size(size).yellow()
+        );
+
+        // Set CARGO_TARGET_DIR for all subsequent cargo commands
+        // SAFETY: We're single-threaded at this point, before spawning any cargo commands
+        unsafe { std::env::set_var("CARGO_TARGET_DIR", target_dir) };
+    }
 
     // Fetch to ensure origin/main is up to date
     println!("  {} Fetching latest from origin...", "⬇️".cyan());
@@ -1783,7 +1844,87 @@ fn run_pre_push() {
 
     println!();
 
-    // Run clippy once with all affected crates
+    // Build nextest tests first (needs cargo lock for compilation)
+    // Then we spawn the test runner in the background while other checks run
+    type TestResult = (
+        Vec<String>,
+        Result<std::process::Output, std::io::Error>,
+        Duration,
+    );
+    let test_handle: Option<std::thread::JoinHandle<TestResult>> = if config.nextest {
+        print!(
+            "  {} Building tests for all affected crates... ",
+            "🔨".cyan()
+        );
+        io::stdout().flush().unwrap();
+        let start = std::time::Instant::now();
+        let mut build_command = vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+            "--no-run".to_string(),
+        ];
+        for crate_name in &affected_crates {
+            build_command.push("-p".to_string());
+            build_command.push(crate_name.to_string());
+        }
+        let build_output = run_command_with_streaming(&build_command, &[]);
+        let elapsed = start.elapsed();
+
+        match build_output {
+            Ok(output) if output.status.success() => {
+                println!(
+                    "{}",
+                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                );
+            }
+            Ok(output) => {
+                println!(
+                    "{}",
+                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                );
+                exit_with_command_failure(&build_command, &[], output, None);
+            }
+            Err(e) => {
+                println!("{}", "failed".red());
+                exit_with_command_error(&build_command, &[], e, None);
+            }
+        }
+
+        // Spawn test runner in background
+        println!(
+            "  {} Running tests in background while other checks run...",
+            "🧪".cyan()
+        );
+        let mut run_command = vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+        ];
+        for crate_name in &affected_crates {
+            run_command.push("-p".to_string());
+            run_command.push(crate_name.to_string());
+        }
+        run_command.push("--no-tests=pass".to_string());
+
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut cmd = command_with_color(&run_command[0]);
+            for arg in &run_command[1..] {
+                cmd.arg(arg);
+            }
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            let output = cmd.output();
+            let elapsed = start.elapsed();
+            (run_command, output, elapsed)
+        });
+        Some(handle)
+    } else {
+        None
+    };
+
+    // Run clippy (can run while tests are running - no cargo lock needed for already-compiled code)
     if config.clippy {
         print!(
             "  {} Running clippy for all affected crates... ",
@@ -1851,49 +1992,7 @@ fn run_pre_push() {
         }
     }
 
-    // Run nextest once with all affected crates (better feature unification)
-    if config.nextest {
-        print!(
-            "  {} Running nextest for all affected crates... ",
-            "🧪".cyan()
-        );
-        io::stdout().flush().unwrap();
-        let start = std::time::Instant::now();
-        let mut nextest_command = vec![
-            "cargo".to_string(),
-            "nextest".to_string(),
-            "run".to_string(),
-        ];
-        for crate_name in &affected_crates {
-            nextest_command.push("-p".to_string());
-            nextest_command.push(crate_name.to_string());
-        }
-        nextest_command.push("--no-tests=pass".to_string());
-        let nextest_output = run_command_with_streaming(&nextest_command, &[]);
-        let elapsed = start.elapsed();
-
-        match nextest_output {
-            Ok(output) if output.status.success() => {
-                println!(
-                    "{}",
-                    format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
-                );
-            }
-            Ok(output) => {
-                println!(
-                    "{}",
-                    format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
-                );
-                exit_with_command_failure(&nextest_command, &[], output, None);
-            }
-            Err(e) => {
-                println!("{}", "failed".red());
-                exit_with_command_error(&nextest_command, &[], e, None);
-            }
-        }
-    }
-
-    // Run doc tests once with all affected crates
+    // Run doc tests (can run in parallel with nextest since they test different things)
     if config.doc_tests {
         print!(
             "  {} Running doc tests for all affected crates... ",
@@ -1947,7 +2046,7 @@ fn run_pre_push() {
         }
     }
 
-    // Build docs once with all affected crates
+    // Build docs
     if config.docs {
         print!(
             "  {} Building docs for all affected crates... ",
@@ -1955,7 +2054,11 @@ fn run_pre_push() {
         );
         io::stdout().flush().unwrap();
         let start = std::time::Instant::now();
-        let mut doc_command = vec!["cargo".to_string(), "doc".to_string()];
+        let mut doc_command = vec![
+            "cargo".to_string(),
+            "doc".to_string(),
+            "--no-deps".to_string(),
+        ];
         for crate_name in &affected_crates {
             doc_command.push("-p".to_string());
             doc_command.push(crate_name.to_string());
@@ -2005,7 +2108,7 @@ fn run_pre_push() {
         }
     }
 
-    // Run cargo-shear to check for unused dependencies
+    // Run cargo-shear
     if config.cargo_shear {
         print!(
             "  {} Running cargo-shear to check for unused dependencies... ",
@@ -2056,6 +2159,38 @@ fn run_pre_push() {
                     output,
                     Some(Box::new(print_shear_fix_hint)),
                 );
+            }
+        }
+    }
+
+    // Wait for background test results
+    if let Some(handle) = test_handle {
+        print!("  {} Waiting for test results... ", "🧪".cyan());
+        io::stdout().flush().unwrap();
+
+        match handle.join() {
+            Ok((run_command, output_result, elapsed)) => match output_result {
+                Ok(output) if output.status.success() => {
+                    println!(
+                        "{}",
+                        format!("passed ({:.1}s)", elapsed.as_secs_f32()).green()
+                    );
+                }
+                Ok(output) => {
+                    println!(
+                        "{}",
+                        format!("failed ({:.1}s)", elapsed.as_secs_f32()).red()
+                    );
+                    exit_with_command_failure(&run_command, &[], output, None);
+                }
+                Err(e) => {
+                    println!("{}", "failed".red());
+                    exit_with_command_error(&run_command, &[], e, None);
+                }
+            },
+            Err(_) => {
+                println!("{}", "failed (thread panicked)".red());
+                std::process::exit(1);
             }
         }
     }
